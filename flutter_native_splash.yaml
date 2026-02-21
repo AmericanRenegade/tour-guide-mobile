@@ -1,0 +1,10 @@
+flutter_native_splash:
+  color: "#1a0a2e"
+  image: assets/Tour_Guide.png
+  android_12:
+    color: "#1a0a2e"
+    icon_background_color: "#1a0a2e"
+    image: assets/Tour_Guide.png
+  fullscreen: true
+  android_gravity: center
+  ios_content_mode: scaleAspectFit
