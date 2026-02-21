@@ -3,10 +3,12 @@ import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:uuid/uuid.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 import 'settings.dart';
 
@@ -56,14 +58,26 @@ class _SplashScreenState extends State<SplashScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFF1a0a2e),
       body: SizedBox.expand(
-        child: Image.asset(
-          'assets/Tour_Guide.png',
-          fit: BoxFit.contain,
-        ),
+        child: Image.asset('assets/Tour_Guide.png', fit: BoxFit.contain),
       ),
     );
   }
 }
+
+// ─── Hierarchy level display names ───────────────────────────────────────────
+
+const List<Map<String, String>> _kHierarchyLevels = [
+  {'key': 'nation',       'label': 'Nation'},
+  {'key': 'region',       'label': 'Region'},
+  {'key': 'state',        'label': 'State'},
+  {'key': 'metro_area',   'label': 'Metro Area'},
+  {'key': 'county',       'label': 'County'},
+  {'key': 'town',         'label': 'Town'},
+  {'key': 'neighborhood', 'label': 'Neighborhood'},
+  {'key': 'landmark',     'label': 'Landmark'},
+];
+
+// ─── HomeScreen ───────────────────────────────────────────────────────────────
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -74,9 +88,10 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
 
-  // ── Settings ───────────────────────────────────────────────────────────────
-  AppSettings _settings = AppSettings(); // overwritten by _loadSettings()
+  // ── Settings + device ──────────────────────────────────────────────────────
+  AppSettings _settings = AppSettings();
   String _debugMessage = '';
+  String _deviceId = '';
 
   // ── Location + image state (always running) ────────────────────────────────
   String _locationText = 'Detecting location...';
@@ -87,6 +102,11 @@ class _HomeScreenState extends State<HomeScreen> {
   Position? _lastImagePosition;
   StreamSubscription<Position>? _locationStream;
 
+  // ── Hierarchy diagnostic state ─────────────────────────────────────────────
+  Map<String, dynamic>? _currentHierarchy;
+  Map<String, dynamic>? _previousHierarchy;
+  List<String> _changedLevels = [];
+
   // ── Narration state (Start/Stop controlled) ────────────────────────────────
   bool _isTracking = false;
   bool _isFetching = false;
@@ -96,7 +116,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ── Shared ─────────────────────────────────────────────────────────────────
   final AudioPlayer _audioPlayer = AudioPlayer();
-
 
   static const double _minMilesBetweenChecks = 0.25;
   static const double _metersPerMile = 1609.34;
@@ -109,16 +128,30 @@ class _HomeScreenState extends State<HomeScreen> {
     _startLocationTracking();
   }
 
-  Future<void> _loadSettings() async {
-    final settings = await AppSettings.load();
-    if (mounted) setState(() => _settings = settings);
-  }
-
   @override
   void dispose() {
     _locationStream?.cancel();
     _audioPlayer.dispose();
     super.dispose();
+  }
+
+  // ─── Settings + device ID load ───────────────────────────────────────────
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    // Load or generate device ID
+    var deviceId = prefs.getString('device_id') ?? '';
+    if (deviceId.isEmpty) {
+      deviceId = const Uuid().v4();
+      await prefs.setString('device_id', deviceId);
+    }
+    final settings = await AppSettings.load();
+    if (mounted) {
+      setState(() {
+        _settings = settings;
+        _deviceId = deviceId;
+      });
+    }
   }
 
   // ─── Permissions ────────────────────────────────────────────────────────────
@@ -144,17 +177,15 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    // Get immediate position on launch
     try {
       final position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
       );
       await _handleLocationUpdate(position, isInitial: true);
     } catch (e) {
       debugPrint('Initial position error: $e');
     }
 
-    // Start continuous GPS stream
     _locationStream = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
@@ -166,7 +197,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _handleLocationUpdate(Position position, {bool isInitial = false}) async {
-    // Check if we've moved far enough to bother checking location
     if (!isInitial && _lastImagePosition != null) {
       final distanceInMeters = Geolocator.distanceBetween(
         _lastImagePosition!.latitude,
@@ -174,55 +204,59 @@ class _HomeScreenState extends State<HomeScreen> {
         position.latitude,
         position.longitude,
       );
-      final distanceInMiles = distanceInMeters / _metersPerMile;
-      if (distanceInMiles < _minMilesBetweenChecks) {
-        // Update button with distance if narration is active and not currently fetching/playing
-        return;
-      }
+      if (distanceInMeters / _metersPerMile < _minMilesBetweenChecks) return;
     }
 
-    // Check location name
-    final locationData = await _checkLocation(position);
-    if (locationData == null) return;
+    final pingData = await _ping(position);
+    if (pingData == null) return;
 
-    final newLocationName = locationData['location_name'] ?? '';
-    _debug('Location check: $newLocationName');
+    final newLocationName = pingData['location_name'] ?? '';
+    _debug('Ping: $newLocationName | changed: ${(pingData['changed_levels'] as List?)?.join(', ')}');
 
-    // Update display name regardless
     setState(() {
       _locationText = newLocationName.isNotEmpty ? newLocationName : 'Unknown location';
-      _currentLocationData = locationData;
+      _currentLocationData = pingData;
+      _currentHierarchy = pingData['current'] != null
+          ? Map<String, dynamic>.from(pingData['current'])
+          : null;
+      _previousHierarchy = pingData['previous'] != null
+          ? Map<String, dynamic>.from(pingData['previous'])
+          : null;
+      _changedLevels = List<String>.from(pingData['changed_levels'] ?? []);
     });
 
-    // Only fetch new image if location name actually changed
     if (newLocationName != _currentLocationName && newLocationName.isNotEmpty) {
       _currentLocationName = newLocationName;
       _lastImagePosition = position;
-      await _fetchImage(locationData);
+      await _fetchImage(pingData);
 
-      // If narration is running, trigger narration for new location too
       if (_isTracking && !_isFetching) {
         _lastNarrationPosition = position;
         await _fetchNarration(position, newLocationName);
       }
     } else {
-      // Same location, slide the anchor
       _lastImagePosition = position;
     }
   }
 
-  // ─── Location check ──────────────────────────────────────────────────────────
+  // ─── /ping ───────────────────────────────────────────────────────────────────
 
-  Future<Map<String, dynamic>?> _checkLocation(Position position) async {
+  Future<Map<String, dynamic>?> _ping(Position position, {bool forceNewSession = false}) async {
+    if (_deviceId.isEmpty) return null;
     try {
       final response = await http.post(
-        Uri.parse('$_backendBase/location'),
+        Uri.parse('$_backendBase/ping'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'latitude': position.latitude, 'longitude': position.longitude}),
+        body: jsonEncode({
+          'device_id': _deviceId,
+          'latitude': position.latitude,
+          'longitude': position.longitude,
+          'force_new_session': forceNewSession,
+        }),
       ).timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) return jsonDecode(response.body);
     } catch (e) {
-      debugPrint('Location check error: $e');
+      debugPrint('Ping error: $e');
     }
     return null;
   }
@@ -251,7 +285,6 @@ class _HomeScreenState extends State<HomeScreen> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         setState(() => _currentImage = base64Decode(data['image'] as String));
-        _debug('Image loaded for ${locationData["location_name"]}');
       } else {
         _debug('Image error: HTTP ${response.statusCode}');
       }
@@ -282,10 +315,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _fetchNarration(Position position, String locationName) async {
     if (_isFetching) return;
     _isFetching = true;
-
-    setState(() {
-      _isLoadingNarration = true;
-    });
+    setState(() => _isLoadingNarration = true);
     _debug('Fetching narration for $locationName');
 
     try {
@@ -295,13 +325,11 @@ class _HomeScreenState extends State<HomeScreen> {
         body: jsonEncode({
           'latitude': position.latitude,
           'longitude': position.longitude,
-          'mode': 'historical'
+          'mode': 'historical',
         }),
       ).timeout(const Duration(seconds: 90));
 
-      if (!_isTracking) {
-        return;
-      }
+      if (!_isTracking) return;
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -314,15 +342,11 @@ class _HomeScreenState extends State<HomeScreen> {
         await _audioPlayer.stop();
         await _playAudio(data['audio']);
       } else {
-        setState(() {
-          _isLoadingNarration = false;
-        });
+        setState(() => _isLoadingNarration = false);
       }
     } catch (e) {
       if (_isTracking) {
-        setState(() {
-          _isLoadingNarration = false;
-        });
+        setState(() => _isLoadingNarration = false);
         _debug('Narration error: $e');
       }
     } finally {
@@ -330,18 +354,17 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // ─── Start narration ────────────────────────────────────────────────────────
+  // ─── Start / Stop narration ──────────────────────────────────────────────────
 
   void _startNarration() async {
     WakelockPlus.enable();
-    setState(() {
-      _isTracking = true;
-    });
+    setState(() => _isTracking = true);
 
-    // Use current known location if we have it, otherwise get fresh position
     Position position;
     try {
-      position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      );
     } catch (e) {
       return;
     }
@@ -352,11 +375,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
     _lastNarrationPosition = position;
     _lastNarrationLocationName = locationName;
-
     await _fetchNarration(position, locationName);
   }
-
-  // ─── Stop narration ─────────────────────────────────────────────────────────
 
   void _stopNarration() {
     _audioPlayer.stop();
@@ -382,6 +402,19 @@ class _HomeScreenState extends State<HomeScreen> {
     if (updated != null) {
       setState(() => _settings = updated);
       await updated.save();
+
+      if (updated.forceNewSession) {
+        // Get current position and ping with force_new_session flag
+        try {
+          final position = await Geolocator.getCurrentPosition(
+            locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+          );
+          await _ping(position, forceNewSession: true);
+          _debug('New session started');
+        } catch (e) {
+          debugPrint('Force new session error: $e');
+        }
+      }
     }
   }
 
@@ -402,12 +435,8 @@ class _HomeScreenState extends State<HomeScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Top: status + location name
             _buildTopSection(),
-
             const SizedBox(height: 12),
-
-            // Middle: bounded image card
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -417,13 +446,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-
             const SizedBox(height: 12),
-
-            // Bottom: loading indicators + buttons
+            _buildHierarchyPanel(),
             _buildBottomSection(),
-
-            // Debug bar — only visible when debug mode is on
             if (_settings.debugMode)
               Container(
                 width: double.infinity,
@@ -445,10 +470,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildImageCard() {
     if (_currentImage != null) {
       return SizedBox.expand(
-        child: Image.memory(
-          _currentImage!,
-          fit: BoxFit.cover,
-        ),
+        child: Image.memory(_currentImage!, fit: BoxFit.cover),
       );
     }
     return Container(
@@ -462,7 +484,7 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Center(
         child: Text(
           _isLoadingImage ? 'Loading image...' : 'Image will appear here',
-          style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 16),
+          style: TextStyle(color: Colors.white.withValues(alpha:0.4), fontSize: 16),
         ),
       ),
     );
@@ -471,17 +493,138 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildTopSection() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Text(
+        _locationText,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 28,
+          fontWeight: FontWeight.bold,
+        ),
+        textAlign: TextAlign.center,
+      ),
+    );
+  }
+
+  // ─── Hierarchy diagnostic panel ──────────────────────────────────────────────
+
+  Widget _buildHierarchyPanel() {
+    if (_currentHierarchy == null) return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha:0.05),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withValues(alpha:0.1)),
+      ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Location name — always visible
-          Text(
-            _locationText,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 28,
-              fontWeight: FontWeight.bold,
+          // Header row
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+            child: Row(
+              children: [
+                const SizedBox(width: 88),
+                Expanded(
+                  child: Text(
+                    'PREVIOUS',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha:0.4),
+                      fontSize: 9,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    'CURRENT',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha:0.4),
+                      fontSize: 9,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                ),
+              ],
             ),
-            textAlign: TextAlign.center,
+          ),
+          const Divider(color: Colors.white12, height: 1),
+          // Level rows
+          ..._kHierarchyLevels.map((level) => _buildHierarchyRow(
+            label: level['label']!,
+            key: level['key']!,
+          )),
+          const SizedBox(height: 4),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHierarchyRow({required String label, required String key}) {
+    final current = _currentHierarchy?[key] as String? ?? '';
+    final previous = _previousHierarchy?[key] as String? ?? '';
+    final changed = _changedLevels.contains(key);
+
+    final rowColor = changed ? Colors.amber.withValues(alpha:0.12) : Colors.transparent;
+    final valueColor = changed ? Colors.amber : Colors.white.withValues(alpha:0.75);
+
+    return Container(
+      color: rowColor,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 80,
+            child: Row(
+              children: [
+                if (changed)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 4),
+                    child: Icon(Icons.star, color: Colors.amber, size: 10),
+                  )
+                else
+                  const SizedBox(width: 14),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha:0.5),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Text(
+              previous.isNotEmpty ? previous : '—',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha:0.4),
+                fontSize: 11,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (changed)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Icon(Icons.arrow_forward, color: Colors.amber.withValues(alpha:0.7), size: 10),
+            )
+          else
+            const SizedBox(width: 18),
+          Expanded(
+            child: Text(
+              current.isNotEmpty ? current : '—',
+              style: TextStyle(
+                color: valueColor,
+                fontSize: 11,
+                fontWeight: changed ? FontWeight.bold : FontWeight.normal,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
         ],
       ),
@@ -491,37 +634,30 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildBottomSection() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // Play / Stop / Settings buttons
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              _buildButton(
-                label: 'Play',
-                color: Colors.green,
-                onPressed: _isTracking ? null : _startNarration,
-              ),
-              const SizedBox(width: 16),
-              _buildButton(
-                label: 'Stop',
-                color: Colors.red,
-                onPressed: _isTracking ? _stopNarration : null,
-              ),
-              const SizedBox(width: 16),
-              _buildButton(
-                label: 'Settings',
-                color: Colors.blueGrey,
-                onPressed: _openSettings,
-              ),
-            ],
+          _buildButton(
+            label: 'Play',
+            color: Colors.green,
+            onPressed: _isTracking ? null : _startNarration,
+          ),
+          const SizedBox(width: 16),
+          _buildButton(
+            label: 'Stop',
+            color: Colors.red,
+            onPressed: _isTracking ? _stopNarration : null,
+          ),
+          const SizedBox(width: 16),
+          _buildButton(
+            label: 'Settings',
+            color: Colors.blueGrey,
+            onPressed: _openSettings,
           ),
         ],
       ),
     );
   }
-
 
   Widget _buildButton({
     required String label,
@@ -531,12 +667,12 @@ class _HomeScreenState extends State<HomeScreen> {
     return ElevatedButton(
       onPressed: onPressed,
       style: ElevatedButton.styleFrom(
-        backgroundColor: onPressed != null ? color.withOpacity(0.85) : Colors.grey.withOpacity(0.3),
+        backgroundColor: onPressed != null ? color.withValues(alpha:0.85) : Colors.grey.withValues(alpha:0.3),
         foregroundColor: Colors.white,
         padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
         elevation: 4,
-        shadowColor: Colors.black.withOpacity(0.5),
+        shadowColor: Colors.black.withValues(alpha:0.5),
       ),
       child: Text(label, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
     );
