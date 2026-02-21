@@ -21,16 +21,47 @@ class TourGuide {
   Map<String, dynamic> toJson() => {'name': name, 'style': style, 'personality': personality};
 }
 
+// ─── PromptVariant model ──────────────────────────────────────────────────────
+
+class PromptVariant {
+  final String id;
+  final String topic;
+  final String label;
+  final String template;
+  final bool active;
+
+  const PromptVariant({
+    required this.id,
+    required this.topic,
+    required this.label,
+    required this.template,
+    required this.active,
+  });
+
+  factory PromptVariant.fromJson(Map<String, dynamic> json) => PromptVariant(
+    id:       json['id']       as String? ?? '',
+    topic:    json['topic']    as String? ?? '',
+    label:    json['label']    as String? ?? '',
+    template: json['template'] as String? ?? '',
+    active:   json['active']   as bool?   ?? true,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'id': id, 'topic': topic, 'label': label, 'template': template, 'active': active,
+  };
+}
+
 // ─── Fallback catalogue (used when server list is not yet loaded) ─────────────
 
-const List<String> kAllNarrators = ['Mike', 'John', 'Kaylin', 'Tomas', 'Christina'];
+const List<String> kAllNarrators = ['Mike', 'John', 'Kaylin', 'Tomas', 'Christina', 'Father Christmas'];
 
 const List<TourGuide> kFallbackGuides = [
-  TourGuide(name: 'Mike',      style: 'Warm and conversational', personality: ''),
-  TourGuide(name: 'John',      style: 'Deep and authoritative',  personality: ''),
-  TourGuide(name: 'Kaylin',    style: 'Clear and energetic',     personality: ''),
-  TourGuide(name: 'Tomas',     style: 'Calm storyteller',        personality: ''),
-  TourGuide(name: 'Christina', style: 'Bright and welcoming',    personality: ''),
+  TourGuide(name: 'Mike',             style: 'Warm and conversational', personality: ''),
+  TourGuide(name: 'John',             style: 'Deep and authoritative',  personality: ''),
+  TourGuide(name: 'Kaylin',           style: 'Clear and energetic',     personality: ''),
+  TourGuide(name: 'Tomas',            style: 'Calm storyteller',        personality: ''),
+  TourGuide(name: 'Christina',        style: 'Bright and welcoming',    personality: ''),
+  TourGuide(name: 'Father Christmas', style: 'Jolly and festive',       personality: ''),
 ];
 
 // ─── AppSettings model ────────────────────────────────────────────────────────
@@ -51,9 +82,11 @@ class AppSettings {
   static Future<AppSettings> load() async {
     final prefs = await SharedPreferences.getInstance();
     final stored = prefs.getStringList('preferredNarrators');
+    // Filter out stale names from old versions; if nothing valid remains, default to all
+    final valid = stored?.where((n) => kAllNarrators.contains(n)).toList();
     return AppSettings(
       debugMode: prefs.getBool('debugMode') ?? false,
-      preferredNarrators: (stored != null && stored.isNotEmpty) ? stored : null,
+      preferredNarrators: (valid != null && valid.isNotEmpty) ? valid : null,
     );
   }
 
@@ -75,6 +108,8 @@ class SettingsContent extends StatefulWidget {
   final Future<void> Function() onClearTracks;
   final List<TourGuide> tourGuides;
   final Future<void> Function() onRefreshTourGuides;
+  final List<PromptVariant> promptVariants;
+  final Future<void> Function() onRefreshPromptVariants;
 
   const SettingsContent({
     super.key,
@@ -84,6 +119,8 @@ class SettingsContent extends StatefulWidget {
     required this.onClearTracks,
     required this.tourGuides,
     required this.onRefreshTourGuides,
+    required this.promptVariants,
+    required this.onRefreshPromptVariants,
   });
 
   @override
@@ -100,7 +137,8 @@ class _SettingsContentState extends State<SettingsContent> {
   bool _clearingContent = false;
   bool _clearingPings = false;
   bool _clearingTracks = false;
-  String? _savingGuide; // name of guide currently being saved
+  String? _savingGuide;    // name of guide currently being saved
+  String? _savingVariant;  // id of variant currently being saved
 
   @override
   void initState() {
@@ -306,6 +344,11 @@ class _SettingsContentState extends State<SettingsContent> {
           _buildSectionHeader('Tour Guides'),
           _buildNarratorSelector(),
 
+          if (_settings.debugMode) ...[
+            _buildSectionHeader('Prompt Variants'),
+            _buildPromptVariantsSection(),
+          ],
+
           _buildSectionHeader('Music'),
           _buildMusicStatus(),
         ],
@@ -355,7 +398,7 @@ class _SettingsContentState extends State<SettingsContent> {
                           )
                     : null,
                 onChanged: (val) {
-                  if (!val && preferred.length == 1) {
+                  if (!val && preferred.length <= 1) {
                     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                       content: Text('At least one tour guide must be selected'),
                       backgroundColor: Colors.black87,
@@ -464,6 +507,212 @@ class _SettingsContentState extends State<SettingsContent> {
       }
     } finally {
       if (mounted) setState(() => _savingGuide = null);
+    }
+  }
+
+  // ── Prompt Variants ──────────────────────────────────────────────────────
+
+  static const Map<String, String> _topicLabels = {
+    'intro':              'Intro',
+    'state_change':       'State Change',
+    'nation_change':      'Nation Change',
+    'county_town_change': 'County / Town',
+    'dwell':              'Nearby Landmark',
+  };
+
+  Widget _buildPromptVariantsSection() {
+    final variants = widget.promptVariants;
+    final topics = _topicLabels.keys.toList();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
+        ],
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text('Tap a topic to view / edit variants',
+                      style: TextStyle(fontSize: 12, color: Colors.black45)),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 18, color: Colors.black38),
+                  tooltip: 'Refresh',
+                  onPressed: widget.onRefreshPromptVariants,
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1, color: Colors.black12),
+          ...topics.map((topic) {
+            final topicVariants = variants.where((v) => v.topic == topic).toList();
+            return ExpansionTile(
+              title: Text(_topicLabels[topic] ?? topic,
+                  style: const TextStyle(fontSize: 15, color: Colors.black87)),
+              subtitle: Text('${topicVariants.length} variant${topicVariants.length == 1 ? '' : 's'}',
+                  style: const TextStyle(fontSize: 12, color: Colors.black45)),
+              shape: const Border(),
+              children: topicVariants.isEmpty
+                  ? [const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text('No variants loaded', style: TextStyle(color: Colors.black38)),
+                    )]
+                  : topicVariants.map((v) {
+                      final isSaving = _savingVariant == v.id;
+                      return ListTile(
+                        dense: true,
+                        title: Text(v.label,
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: v.active ? Colors.black87 : Colors.black38,
+                              fontStyle: v.active ? FontStyle.normal : FontStyle.italic,
+                            )),
+                        subtitle: Text(v.template,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 11, color: Colors.black38)),
+                        trailing: isSaving
+                            ? const SizedBox(width: 20, height: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
+                            : Row(mainAxisSize: MainAxisSize.min, children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: v.active ? _green.withValues(alpha: 0.12) : Colors.black12,
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(v.active ? 'on' : 'off',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: v.active ? _green : Colors.black38,
+                                        fontWeight: FontWeight.bold,
+                                      )),
+                                ),
+                                const SizedBox(width: 4),
+                                IconButton(
+                                  icon: Icon(Icons.edit_rounded, size: 18, color: Colors.black38),
+                                  tooltip: 'Edit',
+                                  onPressed: () => _editPromptVariant(v),
+                                ),
+                              ]),
+                      );
+                    }).toList(),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _editPromptVariant(PromptVariant variant) async {
+    final labelCtrl    = TextEditingController(text: variant.label);
+    final templateCtrl = TextEditingController(text: variant.template);
+    bool activeValue   = variant.active;
+
+    final save = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text('Edit variant: ${variant.label}'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Label', style: TextStyle(fontSize: 12, color: Colors.black54)),
+                const SizedBox(height: 4),
+                TextField(
+                  controller: labelCtrl,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(), isDense: true,
+                    contentPadding: EdgeInsets.all(10),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text('Active', style: TextStyle(fontSize: 12, color: Colors.black54)),
+                    ),
+                    Switch(
+                      value: activeValue,
+                      activeColor: _green,
+                      onChanged: (v) => setDialogState(() => activeValue = v),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                const Text('Template', style: TextStyle(fontSize: 12, color: Colors.black54)),
+                const SizedBox(height: 4),
+                TextField(
+                  controller: templateCtrl,
+                  maxLines: 8,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.all(10),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text('Variables: {subject}, {location_context}',
+                    style: TextStyle(fontSize: 11, color: Colors.black38, fontStyle: FontStyle.italic)),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text('Save', style: TextStyle(color: _green, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (save != true || !mounted) return;
+
+    setState(() => _savingVariant = variant.id);
+    try {
+      final response = await http.patch(
+        Uri.parse('$_backendBase/prompt-variants/${variant.id}'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'label':    labelCtrl.text.trim(),
+          'template': templateCtrl.text.trim(),
+          'active':   activeValue,
+        }),
+      );
+      if (!mounted) return;
+      if (response.statusCode == 200) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Variant "${labelCtrl.text.trim()}" updated'),
+          backgroundColor: _green,
+        ));
+        await widget.onRefreshPromptVariants();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Error: ${response.statusCode}'),
+          backgroundColor: Colors.red.shade400,
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: Colors.red.shade400,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _savingVariant = null);
     }
   }
 

@@ -141,6 +141,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ── Tour guides ─────────────────────────────────────────────────────────────
   List<TourGuide> _tourGuides = [];
+  List<PromptVariant> _promptVariants = [];
 
   // ── Background music ────────────────────────────────────────────────────────
   final AudioPlayer _musicPlayer = AudioPlayer();
@@ -170,7 +171,8 @@ class _HomeScreenState extends State<HomeScreen> {
     _loadSettings();
     if (!_simulationMode) _startLocationTracking();
     _initMusicCache();      // pre-download tracks in background
-    _fetchTourGuides();     // load guide list (with personality) from backend
+    _fetchTourGuides();       // load guide list (with personality) from backend
+    _fetchPromptVariants();   // load prompt variant templates from backend
   }
 
   @override
@@ -235,6 +237,34 @@ class _HomeScreenState extends State<HomeScreen> {
               .map((g) => TourGuide.fromJson(g as Map<String, dynamic>))
               .toList();
           setState(() => _tourGuides = guides);
+        }
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _fetchPromptVariants() async {
+    try {
+      final response = await http.get(Uri.parse('$_backendBase/prompt-variants'))
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final variants = (data['variants'] as List)
+            .map((v) => PromptVariant.fromJson(v as Map<String, dynamic>))
+            .toList();
+        if (mounted) setState(() => _promptVariants = variants);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('promptVariants', jsonEncode(variants.map((v) => v.toJson()).toList()));
+      }
+    } catch (e) {
+      debugPrint('Prompt variants fetch error: $e');
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final cached = prefs.getString('promptVariants');
+        if (cached != null && mounted) {
+          final variants = (jsonDecode(cached) as List)
+              .map((v) => PromptVariant.fromJson(v as Map<String, dynamic>))
+              .toList();
+          setState(() => _promptVariants = variants);
         }
       } catch (_) {}
     }
@@ -1272,6 +1302,8 @@ class _HomeScreenState extends State<HomeScreen> {
       onClearTracks: _clearCachedTracks,
       tourGuides: _tourGuides,
       onRefreshTourGuides: _fetchTourGuides,
+      promptVariants: _promptVariants,
+      onRefreshPromptVariants: _fetchPromptVariants,
     );
   }
 
