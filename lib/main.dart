@@ -93,32 +93,37 @@ class _HomeScreenState extends State<HomeScreen> {
   String _debugMessage = '';
   String _deviceId = '';
 
-  // ── Location + image state (always running) ────────────────────────────────
+  // ── Mode ───────────────────────────────────────────────────────────────────
+  bool _simulationMode = false;
+
+  // ── Location state ──────────────────────────────────────────────────────────
   String _locationText = 'Detecting location...';
-  bool _isLoadingImage = false;
-  Uint8List? _currentImage;
   String _currentLocationName = '';
   Map<String, dynamic>? _currentLocationData;
-  Position? _lastImagePosition;
-  StreamSubscription<Position>? _locationStream;
+  Timer? _pingTimer;
 
   // ── Hierarchy diagnostic state ─────────────────────────────────────────────
   Map<String, dynamic>? _currentHierarchy;
   Map<String, dynamic>? _previousHierarchy;
   List<String> _changedLevels = [];
 
-  // ── Narration state (Start/Stop controlled) ────────────────────────────────
+  // ── Narration state (GPS mode) ─────────────────────────────────────────────
   bool _isTracking = false;
   bool _isFetching = false;
   bool _isLoadingNarration = false;
-  Position? _lastNarrationPosition;
-  String _lastNarrationLocationName = '';
+
+  // ── Simulation state ────────────────────────────────────────────────────────
+  final TextEditingController _startAddressCtrl = TextEditingController();
+  final TextEditingController _endAddressCtrl   = TextEditingController();
+  List<Map<String, double>> _routeWaypoints     = [];
+  int  _waypointIndex    = 0;
+  bool _isLoadingRoute   = false;
+  bool _simulationRunning = false;
 
   // ── Shared ─────────────────────────────────────────────────────────────────
   final AudioPlayer _audioPlayer = AudioPlayer();
 
-  static const double _minMilesBetweenChecks = 0.25;
-  static const double _metersPerMile = 1609.34;
+  static const Duration _pingInterval = Duration(seconds: 15);
   static const String _backendBase = 'https://tour-guide-backend-production.up.railway.app';
 
   @override
@@ -130,8 +135,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
-    _locationStream?.cancel();
+    _pingTimer?.cancel();
     _audioPlayer.dispose();
+    _startAddressCtrl.dispose();
+    _endAddressCtrl.dispose();
     super.dispose();
   }
 
@@ -139,7 +146,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    // Load or generate device ID
     var deviceId = prefs.getString('device_id') ?? '';
     if (deviceId.isEmpty) {
       deviceId = const Uuid().v4();
@@ -168,7 +174,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return true;
   }
 
-  // ─── Always-on location + image tracking ────────────────────────────────────
+  // ─── GPS location tracking ───────────────────────────────────────────────────
 
   Future<void> _startLocationTracking() async {
     final hasPermission = await _requestLocationPermission();
@@ -177,37 +183,34 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
+    // Initial ping immediately on launch
     try {
       final position = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
       );
-      await _handleLocationUpdate(position, isInitial: true);
+      await _handleLocationUpdate(position.latitude, position.longitude);
     } catch (e) {
       debugPrint('Initial position error: $e');
     }
 
-    _locationStream = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 100,
-      ),
-    ).listen((Position position) async {
-      await _handleLocationUpdate(position);
+    // Then ping every 15 seconds
+    _pingTimer = Timer.periodic(_pingInterval, (_) async {
+      if (_simulationMode) return; // don't GPS-ping while simulating
+      try {
+        final position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        );
+        await _handleLocationUpdate(position.latitude, position.longitude);
+      } catch (e) {
+        debugPrint('Ping timer error: $e');
+      }
     });
   }
 
-  Future<void> _handleLocationUpdate(Position position, {bool isInitial = false}) async {
-    if (!isInitial && _lastImagePosition != null) {
-      final distanceInMeters = Geolocator.distanceBetween(
-        _lastImagePosition!.latitude,
-        _lastImagePosition!.longitude,
-        position.latitude,
-        position.longitude,
-      );
-      if (distanceInMeters / _metersPerMile < _minMilesBetweenChecks) return;
-    }
+  // ─── Core location update handler (GPS and simulation share this) ────────────
 
-    final pingData = await _ping(position);
+  Future<void> _handleLocationUpdate(double lat, double lng) async {
+    final pingData = await _ping(lat, lng);
     if (pingData == null) return;
 
     final newLocationName = pingData['location_name'] ?? '';
@@ -227,21 +230,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (newLocationName != _currentLocationName && newLocationName.isNotEmpty) {
       _currentLocationName = newLocationName;
-      _lastImagePosition = position;
-      await _fetchImage(pingData);
 
       if (_isTracking && !_isFetching) {
-        _lastNarrationPosition = position;
-        await _fetchNarration(position, newLocationName);
+        await _fetchNarration(lat, lng, newLocationName);
       }
-    } else {
-      _lastImagePosition = position;
     }
   }
 
   // ─── /ping ───────────────────────────────────────────────────────────────────
 
-  Future<Map<String, dynamic>?> _ping(Position position, {bool forceNewSession = false}) async {
+  Future<Map<String, dynamic>?> _ping(double lat, double lng, {bool forceNewSession = false}) async {
     if (_deviceId.isEmpty) return null;
     try {
       final response = await http.post(
@@ -249,8 +247,8 @@ class _HomeScreenState extends State<HomeScreen> {
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'device_id': _deviceId,
-          'latitude': position.latitude,
-          'longitude': position.longitude,
+          'latitude': lat,
+          'longitude': lng,
           'force_new_session': forceNewSession,
         }),
       ).timeout(const Duration(seconds: 15));
@@ -259,40 +257,6 @@ class _HomeScreenState extends State<HomeScreen> {
       debugPrint('Ping error: $e');
     }
     return null;
-  }
-
-  // ─── Image fetch ─────────────────────────────────────────────────────────────
-
-  Future<void> _fetchImage(Map<String, dynamic> locationData) async {
-    setState(() => _isLoadingImage = true);
-    _debug('Fetching image for ${locationData["location_name"]}');
-    try {
-      final response = await http.post(
-        Uri.parse('$_backendBase/image'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'latitude': 0.0,
-          'longitude': 0.0,
-          'location_name': locationData['location_name'] ?? '',
-          'narration_focus': locationData['narration_focus'] ?? '',
-          'locality': locationData['locality'] ?? '',
-          'sublocality': locationData['sublocality'] ?? '',
-          'county': locationData['county'] ?? '',
-          'state': locationData['state'] ?? '',
-        }),
-      ).timeout(const Duration(seconds: 60));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        setState(() => _currentImage = base64Decode(data['image'] as String));
-      } else {
-        _debug('Image error: HTTP ${response.statusCode}');
-      }
-    } catch (e) {
-      debugPrint('Image fetch error: $e');
-    } finally {
-      setState(() => _isLoadingImage = false);
-    }
   }
 
   // ─── Audio ──────────────────────────────────────────────────────────────────
@@ -312,7 +276,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ─── Narration fetch ────────────────────────────────────────────────────────
 
-  Future<void> _fetchNarration(Position position, String locationName) async {
+  Future<void> _fetchNarration(double lat, double lng, String locationName) async {
     if (_isFetching) return;
     _isFetching = true;
     setState(() => _isLoadingNarration = true);
@@ -323,8 +287,8 @@ class _HomeScreenState extends State<HomeScreen> {
         Uri.parse('$_backendBase/narrate'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          'latitude': position.latitude,
-          'longitude': position.longitude,
+          'latitude': lat,
+          'longitude': lng,
           'mode': 'historical',
         }),
       ).timeout(const Duration(seconds: 90));
@@ -333,11 +297,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        setState(() {
-          _lastNarrationPosition = position;
-          _lastNarrationLocationName = locationName;
-          _isLoadingNarration = false;
-        });
+        setState(() => _isLoadingNarration = false);
         _debug('Narration ready — playing audio');
         await _audioPlayer.stop();
         await _playAudio(data['audio']);
@@ -354,28 +314,35 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // ─── Start / Stop narration ──────────────────────────────────────────────────
+  // ─── Start / Stop narration (GPS mode) ───────────────────────────────────────
 
   void _startNarration() async {
     WakelockPlus.enable();
     setState(() => _isTracking = true);
 
-    Position position;
-    try {
-      position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-      );
-    } catch (e) {
-      return;
+    double lat, lng;
+    if (_simulationMode && _routeWaypoints.isNotEmpty) {
+      final wp = _routeWaypoints[_waypointIndex.clamp(0, _routeWaypoints.length - 1)];
+      lat = wp['lat']!;
+      lng = wp['lng']!;
+    } else {
+      try {
+        final position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        );
+        lat = position.latitude;
+        lng = position.longitude;
+      } catch (e) {
+        WakelockPlus.disable();
+        setState(() => _isTracking = false);
+        return;
+      }
     }
 
     final locationName = _currentLocationName.isNotEmpty
         ? _currentLocationName
         : (_currentLocationData?['location_name'] ?? '');
-
-    _lastNarrationPosition = position;
-    _lastNarrationLocationName = locationName;
-    await _fetchNarration(position, locationName);
+    await _fetchNarration(lat, lng, locationName);
   }
 
   void _stopNarration() {
@@ -385,9 +352,101 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _isTracking = false;
       _isLoadingNarration = false;
-      _lastNarrationPosition = null;
-      _lastNarrationLocationName = '';
     });
+  }
+
+  // ─── Mode switching ──────────────────────────────────────────────────────────
+
+  void _switchMode(bool toSimulation) {
+    if (_simulationMode == toSimulation) return;
+    _pingTimer?.cancel();
+    _audioPlayer.stop();
+    setState(() {
+      _simulationMode = toSimulation;
+      _simulationRunning = false;
+      _isTracking = false;
+      _isLoadingNarration = false;
+      _isFetching = false;
+    });
+    if (!toSimulation) {
+      _startLocationTracking();
+    }
+  }
+
+  // ─── Simulation ──────────────────────────────────────────────────────────────
+
+  Future<void> _fetchRoute() async {
+    final start = _startAddressCtrl.text.trim();
+    final end = _endAddressCtrl.text.trim();
+    if (start.isEmpty || end.isEmpty) return;
+
+    setState(() {
+      _isLoadingRoute = true;
+      _routeWaypoints = [];
+      _waypointIndex = 0;
+      _locationText = 'Loading route...';
+    });
+
+    try {
+      final response = await http.post(
+        Uri.parse('$_backendBase/route'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'start_address': start,
+          'end_address': end,
+          'speed_mph': 45.0,
+        }),
+      ).timeout(const Duration(seconds: 30));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final waypoints = (data['waypoints'] as List)
+            .map<Map<String, double>>((w) => {
+                  'lat': (w['lat'] as num).toDouble(),
+                  'lng': (w['lng'] as num).toDouble(),
+                })
+            .toList();
+        setState(() {
+          _routeWaypoints = waypoints;
+          _waypointIndex = 0;
+          _locationText = '${waypoints.length} waypoints loaded';
+        });
+        _debug('Route: ${waypoints.length} waypoints from $start → $end');
+      } else if (response.statusCode == 404) {
+        setState(() => _locationText = 'Route not found');
+      } else {
+        setState(() => _locationText = 'Route error');
+        _debug('Route error: HTTP ${response.statusCode}');
+      }
+    } catch (e) {
+      setState(() => _locationText = 'Route error');
+      debugPrint('Route fetch error: $e');
+    } finally {
+      setState(() => _isLoadingRoute = false);
+    }
+  }
+
+  void _startSimulation() {
+    if (_routeWaypoints.isEmpty) return;
+    setState(() => _simulationRunning = true);
+    _stepSimulation(); // fire first waypoint immediately
+    _pingTimer = Timer.periodic(_pingInterval, (_) => _stepSimulation());
+  }
+
+  void _stopSimulation() {
+    _pingTimer?.cancel();
+    setState(() => _simulationRunning = false);
+  }
+
+  void _stepSimulation() {
+    if (_waypointIndex >= _routeWaypoints.length) {
+      _stopSimulation();
+      setState(() => _locationText = 'Route complete');
+      return;
+    }
+    final wp = _routeWaypoints[_waypointIndex];
+    _waypointIndex++;
+    _handleLocationUpdate(wp['lat']!, wp['lng']!);
   }
 
   // ─── Settings navigation ────────────────────────────────────────────────────
@@ -404,12 +463,20 @@ class _HomeScreenState extends State<HomeScreen> {
       await updated.save();
 
       if (updated.forceNewSession) {
-        // Get current position and ping with force_new_session flag
         try {
-          final position = await Geolocator.getCurrentPosition(
-            locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-          );
-          await _ping(position, forceNewSession: true);
+          double lat, lng;
+          if (_simulationMode && _routeWaypoints.isNotEmpty) {
+            final wp = _routeWaypoints[_waypointIndex.clamp(0, _routeWaypoints.length - 1)];
+            lat = wp['lat']!;
+            lng = wp['lng']!;
+          } else {
+            final position = await Geolocator.getCurrentPosition(
+              locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+            );
+            lat = position.latitude;
+            lng = position.longitude;
+          }
+          await _ping(lat, lng, forceNewSession: true);
           _debug('New session started');
         } catch (e) {
           debugPrint('Force new session error: $e');
@@ -433,58 +500,29 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
-        child: Column(
-          children: [
-            _buildTopSection(),
-            const SizedBox(height: 12),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: _buildImageCard(),
+        child: SingleChildScrollView(
+          child: Column(
+            children: [
+              _buildTopSection(),
+              const SizedBox(height: 8),
+              _buildHierarchyPanel(),
+              _buildModeToggle(),
+              if (_simulationMode) _buildSimulationControls(),
+              _buildBottomSection(),
+              if (_settings.debugMode)
+                Container(
+                  width: double.infinity,
+                  color: Colors.black,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  child: Text(
+                    _debugMessage.isEmpty ? 'Debug mode on' : _debugMessage,
+                    style: const TextStyle(color: Colors.yellow, fontSize: 11),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            _buildHierarchyPanel(),
-            _buildBottomSection(),
-            if (_settings.debugMode)
-              Container(
-                width: double.infinity,
-                color: Colors.black,
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: Text(
-                  _debugMessage.isEmpty ? 'Debug mode on' : _debugMessage,
-                  style: const TextStyle(color: Colors.yellow, fontSize: 11),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildImageCard() {
-    if (_currentImage != null) {
-      return SizedBox.expand(
-        child: Image.memory(_currentImage!, fit: BoxFit.cover),
-      );
-    }
-    return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0xFF1a0a2e), Color(0xFF0d1b2a)],
-        ),
-      ),
-      child: Center(
-        child: Text(
-          _isLoadingImage ? 'Loading image...' : 'Image will appear here',
-          style: TextStyle(color: Colors.white.withValues(alpha:0.4), fontSize: 16),
+            ],
+          ),
         ),
       ),
     );
@@ -505,6 +543,131 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // ─── Mode toggle ─────────────────────────────────────────────────────────────
+
+  Widget _buildModeToggle() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        children: [
+          Expanded(child: _buildToggleButton(label: 'GPS',      active: !_simulationMode, onTap: () => _switchMode(false))),
+          const SizedBox(width: 8),
+          Expanded(child: _buildToggleButton(label: 'SIMULATE', active:  _simulationMode, onTap: () => _switchMode(true))),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildToggleButton({required String label, required bool active, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: active ? Colors.blueGrey.withValues(alpha: 0.7) : Colors.white.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: active ? Colors.blueGrey : Colors.white.withValues(alpha: 0.15),
+          ),
+        ),
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: active ? Colors.white : Colors.white.withValues(alpha: 0.4),
+            fontSize: 13,
+            fontWeight: active ? FontWeight.bold : FontWeight.normal,
+            letterSpacing: 1.0,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ─── Simulation controls ─────────────────────────────────────────────────────
+
+  Widget _buildSimulationControls() {
+    final hasRoute = _routeWaypoints.isNotEmpty;
+    final canFetch = _startAddressCtrl.text.trim().isNotEmpty &&
+        _endAddressCtrl.text.trim().isNotEmpty &&
+        !_isLoadingRoute;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildAddressField(_startAddressCtrl, 'Start address'),
+          const SizedBox(height: 8),
+          _buildAddressField(_endAddressCtrl, 'End address'),
+          const SizedBox(height: 8),
+          ElevatedButton(
+            onPressed: canFetch ? _fetchRoute : null,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: canFetch
+                  ? Colors.blueGrey.withValues(alpha: 0.8)
+                  : Colors.grey.withValues(alpha: 0.2),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            child: Text(
+              _isLoadingRoute ? 'Loading route...' : 'Get Route',
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+            ),
+          ),
+          if (hasRoute) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Text(
+                  'Step $_waypointIndex of ${_routeWaypoints.length}',
+                  style: TextStyle(color: Colors.white.withValues(alpha: 0.6), fontSize: 11),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: LinearProgressIndicator(
+                    value: _routeWaypoints.isEmpty
+                        ? 0
+                        : _waypointIndex / _routeWaypoints.length,
+                    backgroundColor: Colors.white.withValues(alpha: 0.1),
+                    color: Colors.blueGrey,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAddressField(TextEditingController ctrl, String hint) {
+    return TextField(
+      controller: ctrl,
+      style: const TextStyle(color: Colors.white, fontSize: 14),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.35)),
+        isDense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        filled: true,
+        fillColor: Colors.white.withValues(alpha: 0.08),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide.none,
+        ),
+      ),
+      onChanged: (_) => setState(() {}),
+    );
+  }
+
   // ─── Hierarchy diagnostic panel ──────────────────────────────────────────────
 
   Widget _buildHierarchyPanel() {
@@ -513,14 +676,13 @@ class _HomeScreenState extends State<HomeScreen> {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha:0.05),
+        color: Colors.white.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withValues(alpha:0.1)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header row
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
             child: Row(
@@ -530,7 +692,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Text(
                     'PREVIOUS',
                     style: TextStyle(
-                      color: Colors.white.withValues(alpha:0.4),
+                      color: Colors.white.withValues(alpha: 0.4),
                       fontSize: 9,
                       fontWeight: FontWeight.bold,
                       letterSpacing: 1.2,
@@ -541,7 +703,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Text(
                     'CURRENT',
                     style: TextStyle(
-                      color: Colors.white.withValues(alpha:0.4),
+                      color: Colors.white.withValues(alpha: 0.4),
                       fontSize: 9,
                       fontWeight: FontWeight.bold,
                       letterSpacing: 1.2,
@@ -552,7 +714,6 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const Divider(color: Colors.white12, height: 1),
-          // Level rows
           ..._kHierarchyLevels.map((level) => _buildHierarchyRow(
             label: level['label']!,
             key: level['key']!,
@@ -564,12 +725,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildHierarchyRow({required String label, required String key}) {
-    final current = _currentHierarchy?[key] as String? ?? '';
+    final current  = _currentHierarchy?[key]  as String? ?? '';
     final previous = _previousHierarchy?[key] as String? ?? '';
-    final changed = _changedLevels.contains(key);
+    final changed  = _changedLevels.contains(key);
 
-    final rowColor = changed ? Colors.amber.withValues(alpha:0.12) : Colors.transparent;
-    final valueColor = changed ? Colors.amber : Colors.white.withValues(alpha:0.75);
+    final rowColor   = changed ? Colors.amber.withValues(alpha: 0.12) : Colors.transparent;
+    final valueColor = changed ? Colors.amber : Colors.white.withValues(alpha: 0.75);
 
     return Container(
       color: rowColor,
@@ -590,7 +751,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 Text(
                   label,
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha:0.5),
+                    color: Colors.white.withValues(alpha: 0.5),
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
                   ),
@@ -601,17 +762,14 @@ class _HomeScreenState extends State<HomeScreen> {
           Expanded(
             child: Text(
               previous.isNotEmpty ? previous : '—',
-              style: TextStyle(
-                color: Colors.white.withValues(alpha:0.4),
-                fontSize: 11,
-              ),
+              style: TextStyle(color: Colors.white.withValues(alpha: 0.4), fontSize: 11),
               overflow: TextOverflow.ellipsis,
             ),
           ),
           if (changed)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Icon(Icons.arrow_forward, color: Colors.amber.withValues(alpha:0.7), size: 10),
+              child: Icon(Icons.arrow_forward, color: Colors.amber.withValues(alpha: 0.7), size: 10),
             )
           else
             const SizedBox(width: 18),
@@ -631,23 +789,39 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // ─── Bottom buttons ───────────────────────────────────────────────────────────
+
   Widget _buildBottomSection() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
+      padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          _buildButton(
-            label: 'Play',
-            color: Colors.green,
-            onPressed: _isTracking ? null : _startNarration,
-          ),
-          const SizedBox(width: 16),
-          _buildButton(
-            label: 'Stop',
-            color: Colors.red,
-            onPressed: _isTracking ? _stopNarration : null,
-          ),
+          if (_simulationMode) ...[
+            _buildButton(
+              label: 'Start',
+              color: Colors.green,
+              onPressed: (!_simulationRunning && _routeWaypoints.isNotEmpty) ? _startSimulation : null,
+            ),
+            const SizedBox(width: 16),
+            _buildButton(
+              label: 'Stop',
+              color: Colors.red,
+              onPressed: _simulationRunning ? _stopSimulation : null,
+            ),
+          ] else ...[
+            _buildButton(
+              label: 'Play',
+              color: Colors.green,
+              onPressed: _isTracking ? null : _startNarration,
+            ),
+            const SizedBox(width: 16),
+            _buildButton(
+              label: 'Stop',
+              color: Colors.red,
+              onPressed: _isTracking ? _stopNarration : null,
+            ),
+          ],
           const SizedBox(width: 16),
           _buildButton(
             label: 'Settings',
@@ -667,14 +841,14 @@ class _HomeScreenState extends State<HomeScreen> {
     return ElevatedButton(
       onPressed: onPressed,
       style: ElevatedButton.styleFrom(
-        backgroundColor: onPressed != null ? color.withValues(alpha:0.85) : Colors.grey.withValues(alpha:0.3),
+        backgroundColor: onPressed != null ? color.withValues(alpha: 0.85) : Colors.grey.withValues(alpha: 0.3),
         foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
+        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
         elevation: 4,
-        shadowColor: Colors.black.withValues(alpha:0.5),
+        shadowColor: Colors.black.withValues(alpha: 0.5),
       ),
-      child: Text(label, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+      child: Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
     );
   }
 }
