@@ -12,9 +12,22 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'settings.dart';
+import 'auth_service.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Firebase initialization — requires google-services.json (Android) and
+  // GoogleService-Info.plist (iOS) plus 'flutterfire configure' to generate
+  // lib/firebase_options.dart. If those files aren't present yet, Firebase
+  // initializes without options (will fail silently for auth calls).
+  try {
+    await Firebase.initializeApp();
+  } catch (_) {
+    // firebase_options.dart not generated yet — auth will be no-op until configured
+  }
   runApp(const TourGuideApp());
 }
 
@@ -153,6 +166,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _playNextMusicTrack();
       }
     });
+    _initFirebaseAuth();    // anonymous sign-in + backend user sync
     _loadSettings();
     if (!_simulationMode) _startLocationTracking();
     _initMusicCache();      // pre-download tracks in background
@@ -167,6 +181,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _audioPlayer.dispose();
     _playerStateSub?.cancel();
     _musicStateSub?.cancel();
+    _authStateSub?.cancel();
     _musicFadeTimer?.cancel();
     _musicDeepDuckTimer?.cancel();
     _musicPlayer.dispose();
@@ -174,6 +189,45 @@ class _HomeScreenState extends State<HomeScreen> {
     _endAddressCtrl.dispose();
     _mapController.dispose();
     super.dispose();
+  }
+
+  // ─── Firebase auth ────────────────────────────────────────────────────────
+
+  StreamSubscription<User?>? _authStateSub;
+
+  void _initFirebaseAuth() {
+    _authStateSub = AuthService.authStateChanges.listen((user) async {
+      if (user != null) {
+        // Sync user with backend (non-fatal)
+        final token = await AuthService.getIdToken();
+        if (token != null) _syncAuthWithBackend(token);
+      } else {
+        // No Firebase user — sign in anonymously
+        try {
+          await AuthService.signInAnonymously();
+          // authStateChanges fires again with the anonymous user
+        } catch (e) {
+          debugPrint('Anonymous sign-in error: $e');
+        }
+      }
+    });
+  }
+
+  Future<void> _syncAuthWithBackend(String idToken) async {
+    if (_deviceId.isEmpty) return;
+    try {
+      final response = await http.post(
+        Uri.parse('$_backendBase/auth/sync'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'device_id': _deviceId, 'id_token': idToken}),
+      ).timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        debugPrint('Auth sync OK: role=${data['role']}, method=${data['auth_method']}');
+      }
+    } catch (e) {
+      debugPrint('Auth sync error (non-fatal): $e');
+    }
   }
 
   // ─── Settings + device ID load ───────────────────────────────────────────
@@ -335,9 +389,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<Map<String, dynamic>?> _ping(double lat, double lng, {bool forceNewSession = false}) async {
     if (_deviceId.isEmpty) return null;
     try {
+      // Include Firebase ID token so backend can link device → user
+      final headers = <String, String>{'Content-Type': 'application/json'};
+      final token = await AuthService.getIdToken();
+      if (token != null) headers['Authorization'] = 'Bearer $token';
+
       final response = await http.post(
         Uri.parse('$_backendBase/ping'),
-        headers: {'Content-Type': 'application/json'},
+        headers: headers,
         body: jsonEncode({
           'device_id': _deviceId,
           'latitude': lat,

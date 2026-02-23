@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'auth_service.dart';
 
 // ─── TourGuide model ──────────────────────────────────────────────────────────
 
@@ -1048,8 +1050,114 @@ class _SettingsContentState extends State<SettingsContent> {
             },
           ),
           _buildMusicStatus(),
+
+          _buildSectionHeader('Account'),
+          _buildAccountSection(),
         ],
       ),
+    );
+  }
+
+  Widget _buildAccountSection() {
+    return StreamBuilder<User?>(
+      stream: AuthService.authStateChanges,
+      builder: (context, snapshot) {
+        final user = snapshot.data ?? FirebaseAuth.instance.currentUser;
+        final isAnon = user == null || user.isAnonymous;
+
+        return Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: [
+              BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
+            ],
+          ),
+          child: isAnon
+              ? Column(
+                  children: [
+                    ListTile(
+                      leading: const Icon(Icons.person_outline_rounded, color: Colors.black38),
+                      title: const Text('Anonymous', style: TextStyle(color: Colors.black87, fontSize: 14)),
+                      subtitle: const Text('Sign in to save tour history across devices', style: TextStyle(color: Colors.black45, fontSize: 12)),
+                    ),
+                    const Divider(height: 1, indent: 16, endIndent: 16, color: Colors.black12),
+                    ListTile(
+                      leading: const Icon(Icons.login_rounded, color: _green),
+                      title: const Text('Link Google Account', style: TextStyle(color: _green, fontSize: 14, fontWeight: FontWeight.w600)),
+                      trailing: const Icon(Icons.chevron_right_rounded, color: Colors.black26),
+                      onTap: () async {
+                        try {
+                          await AuthService.linkWithGoogle();
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Google account linked!')),
+                            );
+                          }
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Sign-in failed: $e')),
+                            );
+                          }
+                        }
+                      },
+                    ),
+                    const Divider(height: 1, indent: 16, endIndent: 16, color: Colors.black12),
+                    ListTile(
+                      leading: const Icon(Icons.facebook_rounded, color: Color(0xFF1877F2)),
+                      title: const Text('Link Facebook Account', style: TextStyle(color: Color(0xFF1877F2), fontSize: 14, fontWeight: FontWeight.w600)),
+                      trailing: const Icon(Icons.chevron_right_rounded, color: Colors.black26),
+                      onTap: () async {
+                        try {
+                          await AuthService.linkWithFacebook();
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Facebook account linked!')),
+                            );
+                          }
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Sign-in failed: $e')),
+                            );
+                          }
+                        }
+                      },
+                    ),
+                  ],
+                )
+              : Column(
+                  children: [
+                    ListTile(
+                      leading: user.photoURL != null
+                          ? CircleAvatar(
+                              backgroundImage: NetworkImage(user.photoURL!),
+                              radius: 16,
+                            )
+                          : const Icon(Icons.account_circle_rounded, color: _green),
+                      title: Text(
+                        user.displayName ?? user.email ?? 'Signed in',
+                        style: const TextStyle(color: Colors.black87, fontSize: 14, fontWeight: FontWeight.w600),
+                      ),
+                      subtitle: Text(
+                        user.email ?? '',
+                        style: const TextStyle(color: Colors.black45, fontSize: 12),
+                      ),
+                    ),
+                    const Divider(height: 1, indent: 16, endIndent: 16, color: Colors.black12),
+                    ListTile(
+                      leading: const Icon(Icons.logout_rounded, color: Colors.red),
+                      title: const Text('Sign Out', style: TextStyle(color: Colors.red, fontSize: 14, fontWeight: FontWeight.w600)),
+                      onTap: () async {
+                        await AuthService.signOut();
+                      },
+                    ),
+                  ],
+                ),
+        );
+      },
     );
   }
 
