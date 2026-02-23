@@ -949,12 +949,18 @@ class SettingsContent extends StatefulWidget {
   final AppSettings settings;
   final void Function(AppSettings) onChanged;
   final List<String> cachedMusicTracks;
+  final String prefDefaultState;
+  final int prefMinScore;
+  final Future<void> Function({String? defaultState, int? minScore}) onSavePreferences;
 
   const SettingsContent({
     super.key,
     required this.settings,
     required this.onChanged,
     required this.cachedMusicTracks,
+    required this.prefDefaultState,
+    required this.prefMinScore,
+    required this.onSavePreferences,
   });
 
   @override
@@ -966,6 +972,10 @@ class _SettingsContentState extends State<SettingsContent> {
   static const Color _cream = Color(0xFFF5EDD8);
 
   late AppSettings _settings;
+  late String _prefDefaultState;
+  late int _prefMinScore;
+  bool _savingPrefs = false;
+  bool _prefsSaved = false;
 
   @override
   void initState() {
@@ -974,6 +984,8 @@ class _SettingsContentState extends State<SettingsContent> {
       debugMode: widget.settings.debugMode,
       musicEnabled: widget.settings.musicEnabled,
     );
+    _prefDefaultState = widget.prefDefaultState;
+    _prefMinScore = widget.prefMinScore;
   }
 
   void _notify() => widget.onChanged(_settings);
@@ -1028,6 +1040,9 @@ class _SettingsContentState extends State<SettingsContent> {
             },
           ),
 
+          _buildSectionHeader('Narration Defaults'),
+          _buildNarrationDefaults(),
+
           _buildSectionHeader('Developer'),
           _buildToggleSetting(
             label: 'Debug Mode',
@@ -1054,6 +1069,154 @@ class _SettingsContentState extends State<SettingsContent> {
           _buildSectionHeader('Account'),
           _buildAccountSection(),
         ],
+      ),
+    );
+  }
+
+  static const List<String> _usStates = [
+    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA',
+    'HI','ID','IL','IN','IA','KS','KY','LA','ME','MD',
+    'MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+    'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
+    'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC',
+  ];
+
+  Widget _buildNarrationDefaults() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'These defaults are saved to your account and applied when the app starts.',
+              style: TextStyle(color: Colors.black45, fontSize: 12),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                // State picker
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'DEFAULT STATE',
+                        style: TextStyle(color: Colors.black45, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.2),
+                      ),
+                      const SizedBox(height: 6),
+                      Container(
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.black12),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: _prefDefaultState,
+                            isExpanded: true,
+                            style: const TextStyle(color: Colors.black87, fontSize: 14),
+                            items: _usStates.map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
+                            onChanged: (val) {
+                              if (val != null) setState(() => _prefDefaultState = val);
+                            },
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                // Min score
+                SizedBox(
+                  width: 80,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'MIN SCORE',
+                        style: TextStyle(color: Colors.black45, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.2),
+                      ),
+                      const SizedBox(height: 6),
+                      Container(
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.black12),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Row(
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.remove, size: 16),
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(minWidth: 32, minHeight: 40),
+                              onPressed: _prefMinScore > 0
+                                  ? () => setState(() => _prefMinScore--)
+                                  : null,
+                            ),
+                            Expanded(
+                              child: Text(
+                                '$_prefMinScore',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(color: Colors.black87, fontSize: 14, fontWeight: FontWeight.w600),
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.add, size: 16),
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(minWidth: 32, minHeight: 40),
+                              onPressed: _prefMinScore < 10
+                                  ? () => setState(() => _prefMinScore++)
+                                  : null,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _savingPrefs ? null : () async {
+                  setState(() { _savingPrefs = true; _prefsSaved = false; });
+                  try {
+                    await widget.onSavePreferences(
+                      defaultState: _prefDefaultState,
+                      minScore: _prefMinScore,
+                    );
+                    setState(() => _prefsSaved = true);
+                    Future.delayed(const Duration(seconds: 2), () {
+                      if (mounted) setState(() => _prefsSaved = false);
+                    });
+                  } finally {
+                    if (mounted) setState(() => _savingPrefs = false);
+                  }
+                },
+                icon: _savingPrefs
+                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : Icon(_prefsSaved ? Icons.check_rounded : Icons.save_rounded, size: 16),
+                label: Text(_prefsSaved ? 'Saved!' : 'Save Defaults'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _green,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

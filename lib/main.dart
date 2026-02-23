@@ -138,6 +138,10 @@ class _HomeScreenState extends State<HomeScreen> {
   final AudioPlayer _audioPlayer = AudioPlayer();
   StreamSubscription<PlayerState>? _playerStateSub;
 
+  // ── User preferences ────────────────────────────────────────────────────────
+  String _prefDefaultState = 'MD';
+  int    _prefMinScore      = 7;
+
   // ── Tour guides ─────────────────────────────────────────────────────────────
   List<TourGuide> _tourGuides = [];
   List<PromptVariant> _promptVariants = [];
@@ -225,9 +229,58 @@ class _HomeScreenState extends State<HomeScreen> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         debugPrint('Auth sync OK: role=${data['role']}, method=${data['auth_method']}');
+        // Fetch user preferences after a successful sync
+        await _fetchUserPreferences(idToken);
       }
     } catch (e) {
       debugPrint('Auth sync error (non-fatal): $e');
+    }
+  }
+
+  Future<void> _fetchUserPreferences(String idToken) async {
+    try {
+      final response = await http.get(
+        Uri.parse('$_backendBase/user/preferences'),
+        headers: {'Authorization': 'Bearer $idToken'},
+      ).timeout(const Duration(seconds: 8));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final state = data['default_state'] as String? ?? 'MD';
+        final score = (data['min_score'] as num?)?.toInt() ?? 7;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('pref_default_state', state);
+        await prefs.setInt('pref_min_score', score);
+        if (mounted) setState(() { _prefDefaultState = state; _prefMinScore = score; });
+        debugPrint('Preferences loaded: state=$state, minScore=$score');
+      }
+    } catch (e) {
+      debugPrint('Fetch preferences error (non-fatal): $e');
+    }
+  }
+
+  Future<void> _saveUserPreferences({String? defaultState, int? minScore}) async {
+    try {
+      final token = await AuthService.getIdToken();
+      if (token == null) return;
+      final body = <String, dynamic>{};
+      if (defaultState != null) body['default_state'] = defaultState;
+      if (minScore != null) body['min_score'] = minScore;
+      await http.patch(
+        Uri.parse('$_backendBase/user/preferences'),
+        headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'},
+        body: jsonEncode(body),
+      ).timeout(const Duration(seconds: 8));
+      final prefs = await SharedPreferences.getInstance();
+      if (defaultState != null) {
+        await prefs.setString('pref_default_state', defaultState);
+        if (mounted) setState(() => _prefDefaultState = defaultState);
+      }
+      if (minScore != null) {
+        await prefs.setInt('pref_min_score', minScore);
+        if (mounted) setState(() => _prefMinScore = minScore);
+      }
+    } catch (e) {
+      debugPrint('Save preferences error (non-fatal): $e');
     }
   }
 
@@ -241,10 +294,15 @@ class _HomeScreenState extends State<HomeScreen> {
       await prefs.setString('device_id', deviceId);
     }
     final settings = await AppSettings.load();
+    // Load cached preferences (updated after auth sync)
+    final defaultState = prefs.getString('pref_default_state') ?? 'MD';
+    final minScore     = prefs.getInt('pref_min_score') ?? 7;
     if (mounted) {
       setState(() {
-        _settings = settings;
-        _deviceId = deviceId;
+        _settings         = settings;
+        _deviceId         = deviceId;
+        _prefDefaultState = defaultState;
+        _prefMinScore     = minScore;
       });
     }
   }
@@ -403,6 +461,7 @@ class _HomeScreenState extends State<HomeScreen> {
           'latitude': lat,
           'longitude': lng,
           'force_new_session': forceNewSession,
+          'min_score_filter': _prefMinScore,
         }),
       ).timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) return jsonDecode(response.body);
@@ -1358,6 +1417,9 @@ class _HomeScreenState extends State<HomeScreen> {
       settings: _settings,
       onChanged: _onSettingsChanged,
       cachedMusicTracks: _cachedTracks,
+      prefDefaultState: _prefDefaultState,
+      prefMinScore: _prefMinScore,
+      onSavePreferences: _saveUserPreferences,
     );
   }
 
