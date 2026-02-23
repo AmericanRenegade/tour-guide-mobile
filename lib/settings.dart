@@ -68,110 +68,238 @@ const List<TourGuide> kFallbackGuides = [
 
 class AppSettings {
   bool debugMode;
+  bool musicEnabled;
   bool forceNewSession; // transient — not persisted, consumed on return to HomeScreen
-  List<String> preferredNarrators;
 
   AppSettings({
     this.debugMode = false,
+    this.musicEnabled = true,
     this.forceNewSession = false,
-    List<String>? preferredNarrators,
-  }) : preferredNarrators = (preferredNarrators != null && preferredNarrators.isNotEmpty)
-           ? preferredNarrators
-           : List<String>.from(kAllNarrators);
+  });
 
   static Future<AppSettings> load() async {
     final prefs = await SharedPreferences.getInstance();
-    final stored = prefs.getStringList('preferredNarrators');
-    // Filter out stale names from old versions; if nothing valid remains, default to all
-    final valid = stored?.where((n) => kAllNarrators.contains(n)).toList();
     return AppSettings(
       debugMode: prefs.getBool('debugMode') ?? false,
-      preferredNarrators: (valid != null && valid.isNotEmpty) ? valid : null,
+      musicEnabled: prefs.getBool('musicEnabled') ?? true,
     );
   }
 
   Future<void> save() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('debugMode', debugMode);
-    await prefs.setStringList('preferredNarrators', preferredNarrators);
+    await prefs.setBool('musicEnabled', musicEnabled);
     // forceNewSession is intentionally not persisted
   }
 }
 
-// ─── SettingsContent ──────────────────────────────────────────────────────────
-// Embedded settings widget (no Scaffold/AppBar — designed to live inside a PageView).
+// ─── GuideAvatar ─────────────────────────────────────────────────────────────
+// Shows a portrait image from assets/guides/{name}.png, with gradient+initial fallback.
 
-class SettingsContent extends StatefulWidget {
-  final AppSettings settings;
-  final void Function(AppSettings) onChanged;
-  final List<String> cachedMusicTracks;
-  final Future<void> Function() onClearTracks;
+class GuideAvatar extends StatelessWidget {
+  final TourGuide guide;
+
+  const GuideAvatar({required this.guide, super.key});
+
+  static const List<List<Color>> _palettes = [
+    [Color(0xFF3DAA74), Color(0xFF1E6B47)],
+    [Color(0xFF2196F3), Color(0xFF0D47A1)],
+    [Color(0xFFFF6B35), Color(0xFFE64A19)],
+    [Color(0xFF9C27B0), Color(0xFF4A148C)],
+    [Color(0xFFFFB300), Color(0xFFE65100)],
+    [Color(0xFFE91E63), Color(0xFF880E4F)],
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final assetPath =
+        'assets/guides/${guide.name.toLowerCase().replaceAll(' ', '_')}.png';
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: Image.asset(
+        assetPath,
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => _buildFallback(),
+      ),
+    );
+  }
+
+  Widget _buildFallback() {
+    final palette = _palettes[guide.name.hashCode.abs() % _palettes.length];
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: palette,
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+      child: Center(
+        child: Text(
+          guide.name[0].toUpperCase(),
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 48,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── TourGuidesScreen ─────────────────────────────────────────────────────────
+// Full-screen guide selector with 3-column grid. Designed for a dark background page.
+
+class TourGuidesScreen extends StatelessWidget {
+  final List<TourGuide> guides;
+  final Future<void> Function() onRefresh;
+
+  const TourGuidesScreen({
+    required this.guides,
+    required this.onRefresh,
+    super.key,
+  });
+
+  static const Color _green = Color(0xFF3DAA74);
+
+  @override
+  Widget build(BuildContext context) {
+    final displayGuides = guides.isNotEmpty ? guides : kFallbackGuides;
+    return Container(
+      color: Colors.black,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 20, 8, 0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: const [
+                          Icon(Icons.people_rounded, color: _green, size: 22),
+                          SizedBox(width: 8),
+                          Text(
+                            'Tour Guides',
+                            style: TextStyle(
+                                color: _green,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'Your narrators on this journey',
+                        style: TextStyle(color: Colors.white54, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh_rounded, color: Colors.white38),
+                  onPressed: onRefresh,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Expanded(
+            child: GridView.builder(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 12,
+                mainAxisSpacing: 12,
+                childAspectRatio: 0.85,
+              ),
+              itemCount: displayGuides.length,
+              itemBuilder: (ctx, i) => _buildGuideCard(displayGuides[i]),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGuideCard(TourGuide guide) {
+    return Column(
+      children: [
+        Expanded(
+          child: GuideAvatar(guide: guide),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          guide.name,
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.white70,
+            fontSize: 12,
+            fontWeight: FontWeight.normal,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ─── AdminContent ─────────────────────────────────────────────────────────────
+// Debug-mode-only screen: clear data actions, guide editor, prompt variants editor.
+
+class AdminContent extends StatefulWidget {
   final List<TourGuide> tourGuides;
   final Future<void> Function() onRefreshTourGuides;
   final List<PromptVariant> promptVariants;
   final Future<void> Function() onRefreshPromptVariants;
+  final Future<void> Function() onClearTracks;
+  final Map<String, dynamic>? currentHierarchy;
+  final Map<String, dynamic>? previousHierarchy;
+  final List<String> changedLevels;
 
-  const SettingsContent({
+  const AdminContent({
     super.key,
-    required this.settings,
-    required this.onChanged,
-    required this.cachedMusicTracks,
-    required this.onClearTracks,
     required this.tourGuides,
     required this.onRefreshTourGuides,
     required this.promptVariants,
     required this.onRefreshPromptVariants,
+    required this.onClearTracks,
+    this.currentHierarchy,
+    this.previousHierarchy,
+    this.changedLevels = const [],
   });
 
   @override
-  State<SettingsContent> createState() => _SettingsContentState();
+  State<AdminContent> createState() => _AdminContentState();
 }
 
-class _SettingsContentState extends State<SettingsContent> {
+class _AdminContentState extends State<AdminContent> {
   static const String _backendBase = 'https://tour-guide-backend-production.up.railway.app';
   static const Color _green = Color(0xFF3DAA74);
   static const Color _cream = Color(0xFFF5EDD8);
 
-  late AppSettings _settings;
   bool _clearingNarrations = false;
   bool _clearingContent = false;
   bool _clearingPings = false;
   bool _clearingTracks = false;
-  String? _savingGuide;    // name of guide currently being saved
-  String? _savingVariant;  // id of variant currently being saved
+  String? _savingGuide;
+  String? _savingVariant;
 
-  @override
-  void initState() {
-    super.initState();
-    _settings = AppSettings(
-      debugMode: widget.settings.debugMode,
-      preferredNarrators: List<String>.from(widget.settings.preferredNarrators),
-    );
-  }
+  static const Map<String, String> _topicLabels = {
+    'intro':              'Intro',
+    'state_change':       'State Change',
+    'nation_change':      'Nation Change',
+    'county_town_change': 'County / Town',
+    'dwell':              'Nearby Place',
+    'dwell_person':       'Famous Person Born Here',
+  };
 
-  void _notify() => widget.onChanged(_settings);
-
-  Future<void> _clearPings() async {
-    setState(() => _clearingPings = true);
-    try {
-      final response = await http.post(Uri.parse('$_backendBase/debug/clear-pings'));
-      final data = jsonDecode(response.body);
-      if (!mounted) return;
-      final count = data['deleted_count'] ?? 0;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Cleared $count ping(s)'),
-        backgroundColor: _green,
-      ));
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Error: $e'),
-        backgroundColor: Colors.red.shade400,
-      ));
-    } finally {
-      if (mounted) setState(() => _clearingPings = false);
-    }
-  }
+  // ── Clear actions ─────────────────────────────────────────────────────────
 
   Future<void> _clearContent() async {
     setState(() => _clearingContent = true);
@@ -217,212 +345,56 @@ class _SettingsContentState extends State<SettingsContent> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: _cream,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 80),
-        children: [
-          // Header
-          Padding(
-            padding: const EdgeInsets.fromLTRB(0, 20, 0, 0),
-            child: Row(
-              children: const [
-                Icon(Icons.directions_bus_rounded, color: _green, size: 22),
-                SizedBox(width: 8),
-                Text(
-                  'Tour Guide',
-                  style: TextStyle(color: _green, fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.only(top: 14, bottom: 2),
-            child: Text(
-              'SETTINGS',
-              style: TextStyle(
-                color: Colors.black54,
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.5,
-              ),
-            ),
-          ),
-          const Text(
-            'Preferences & Tools',
-            style: TextStyle(color: Colors.black, fontSize: 28, fontWeight: FontWeight.bold, height: 1.1),
-          ),
-          const SizedBox(height: 20),
+  Future<void> _clearPings() async {
+    setState(() => _clearingPings = true);
+    try {
+      final response = await http.post(Uri.parse('$_backendBase/debug/clear-pings'));
+      final data = jsonDecode(response.body);
+      if (!mounted) return;
+      final count = data['deleted_count'] ?? 0;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Cleared $count ping(s)'),
+        backgroundColor: _green,
+      ));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Error: $e'),
+        backgroundColor: Colors.red.shade400,
+      ));
+    } finally {
+      if (mounted) setState(() => _clearingPings = false);
+    }
+  }
 
-          _buildSectionHeader('Developer'),
-          _buildToggleSetting(
-            label: 'Debug Mode',
-            description: 'Show debug information at the bottom of the screen',
-            value: _settings.debugMode,
-            onChanged: (val) {
-              setState(() => _settings.debugMode = val);
-              _notify();
-            },
+  Future<void> _clearTracks() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear Cached Tracks?'),
+        content: const Text(
+          'This will delete all locally cached music files. '
+          'They will re-download automatically the next time you start a tour.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
           ),
-          if (_settings.debugMode) ...[
-            _buildActionSetting(
-              label: 'Clear Content Cache',
-              description: 'Delete all generated narration content so everything is regenerated fresh',
-              icon: _clearingContent
-                  ? const SizedBox(width: 20, height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
-                  : Icon(Icons.auto_delete_rounded, color: Colors.red.shade400),
-              onTap: _clearingContent ? null : _clearContent,
-            ),
-            _buildActionSetting(
-              label: 'Clear Narrations',
-              description: 'Delete all narration queue records from the database (pending and played)',
-              icon: _clearingNarrations
-                  ? const SizedBox(width: 20, height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
-                  : Icon(Icons.delete_sweep_rounded, color: Colors.red.shade400),
-              onTap: _clearingNarrations ? null : _clearNarrations,
-            ),
-            _buildActionSetting(
-              label: 'Clear Ping History',
-              description: 'Delete all location ping records from the database',
-              icon: _clearingPings
-                  ? const SizedBox(width: 20, height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
-                  : Icon(Icons.location_off_rounded, color: Colors.red.shade400),
-              onTap: _clearingPings ? null : _clearPings,
-            ),
-            _buildActionSetting(
-              label: 'Clear Cached Tracks',
-              description: 'Delete locally cached music files so they re-download on next start',
-              icon: _clearingTracks
-                  ? const SizedBox(width: 20, height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
-                  : Icon(Icons.music_off_rounded, color: Colors.red.shade400),
-              onTap: _clearingTracks ? null : () async {
-                final confirmed = await showDialog<bool>(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    title: const Text('Clear Cached Tracks?'),
-                    content: const Text(
-                      'This will delete all locally cached music files. '
-                      'They will re-download automatically the next time you start a tour.',
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(ctx, false),
-                        child: const Text('Cancel'),
-                      ),
-                      TextButton(
-                        onPressed: () => Navigator.pop(ctx, true),
-                        child: Text('Clear', style: TextStyle(color: Colors.red.shade400)),
-                      ),
-                    ],
-                  ),
-                );
-                if (confirmed != true) return;
-                setState(() => _clearingTracks = true);
-                await widget.onClearTracks();
-                if (mounted) setState(() => _clearingTracks = false);
-              },
-            ),
-          ],
-
-          _buildSectionHeader('Session'),
-          _buildActionSetting(
-            label: 'Start New Session',
-            description: 'End the current tour session and begin a fresh one on your next location update',
-            icon: const Icon(Icons.refresh_rounded, color: _green),
-            onTap: () {
-              setState(() => _settings.forceNewSession = true);
-              _notify();
-            },
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('Clear', style: TextStyle(color: Colors.red.shade400)),
           ),
-
-          _buildSectionHeader('Tour Guides'),
-          _buildNarratorSelector(),
-
-          if (_settings.debugMode) ...[
-            _buildSectionHeader('Prompt Variants'),
-            _buildPromptVariantsSection(),
-          ],
-
-          _buildSectionHeader('Music'),
-          _buildMusicStatus(),
         ],
       ),
     );
+    if (confirmed != true) return;
+    setState(() => _clearingTracks = true);
+    await widget.onClearTracks();
+    if (mounted) setState(() => _clearingTracks = false);
   }
 
-  Widget _buildNarratorSelector() {
-    final preferred = _settings.preferredNarrators;
-    final guides = widget.tourGuides.isNotEmpty ? widget.tourGuides : kFallbackGuides;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
-        ],
-      ),
-      child: Column(
-        children: guides.asMap().entries.map((entry) {
-          final idx    = entry.key;
-          final guide  = entry.value;
-          final name   = guide.name;
-          final style  = guide.style;
-          final selected = preferred.contains(name);
-          final isLast   = idx == guides.length - 1;
-          final isSaving = _savingGuide == name;
-          return Column(
-            children: [
-              SwitchListTile(
-                title: Text(name,
-                    style: const TextStyle(color: Colors.black87, fontSize: 16)),
-                subtitle: Text(style,
-                    style: const TextStyle(color: Colors.black45, fontSize: 12)),
-                value: selected,
-                activeThumbColor: _green,
-                inactiveTrackColor: Colors.black12,
-                secondary: _settings.debugMode
-                    ? isSaving
-                        ? const SizedBox(width: 20, height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
-                        : IconButton(
-                            icon: Icon(Icons.edit_rounded, size: 18, color: Colors.black38),
-                            tooltip: 'Edit personality',
-                            onPressed: () => _editTourGuide(guide),
-                          )
-                    : null,
-                onChanged: (val) {
-                  if (!val && preferred.length <= 1) {
-                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                      content: Text('At least one tour guide must be selected'),
-                      backgroundColor: Colors.black87,
-                    ));
-                    return;
-                  }
-                  setState(() {
-                    if (val) {
-                      _settings.preferredNarrators = [...preferred, name];
-                    } else {
-                      _settings.preferredNarrators = preferred.where((n) => n != name).toList();
-                    }
-                  });
-                  _notify();
-                },
-              ),
-              if (!isLast)
-                const Divider(height: 1, indent: 16, endIndent: 16, color: Colors.black12),
-            ],
-          );
-        }).toList(),
-      ),
-    );
-  }
+  // ── Tour Guide editor ────────────────────────────────────────────────────
 
   Future<void> _editTourGuide(TourGuide guide) async {
     final personalityCtrl = TextEditingController(text: guide.personality);
@@ -510,106 +482,7 @@ class _SettingsContentState extends State<SettingsContent> {
     }
   }
 
-  // ── Prompt Variants ──────────────────────────────────────────────────────
-
-  static const Map<String, String> _topicLabels = {
-    'intro':              'Intro',
-    'state_change':       'State Change',
-    'nation_change':      'Nation Change',
-    'county_town_change': 'County / Town',
-    'dwell':              'Nearby Landmark',
-  };
-
-  Widget _buildPromptVariantsSection() {
-    final variants = widget.promptVariants;
-    final topics = _topicLabels.keys.toList();
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
-        ],
-      ),
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Row(
-              children: [
-                const Expanded(
-                  child: Text('Tap a topic to view / edit variants',
-                      style: TextStyle(fontSize: 12, color: Colors.black45)),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.refresh, size: 18, color: Colors.black38),
-                  tooltip: 'Refresh',
-                  onPressed: widget.onRefreshPromptVariants,
-                ),
-              ],
-            ),
-          ),
-          const Divider(height: 1, color: Colors.black12),
-          ...topics.map((topic) {
-            final topicVariants = variants.where((v) => v.topic == topic).toList();
-            return ExpansionTile(
-              title: Text(_topicLabels[topic] ?? topic,
-                  style: const TextStyle(fontSize: 15, color: Colors.black87)),
-              subtitle: Text('${topicVariants.length} variant${topicVariants.length == 1 ? '' : 's'}',
-                  style: const TextStyle(fontSize: 12, color: Colors.black45)),
-              shape: const Border(),
-              children: topicVariants.isEmpty
-                  ? [const Padding(
-                      padding: EdgeInsets.all(16),
-                      child: Text('No variants loaded', style: TextStyle(color: Colors.black38)),
-                    )]
-                  : topicVariants.map((v) {
-                      final isSaving = _savingVariant == v.id;
-                      return ListTile(
-                        dense: true,
-                        title: Text(v.label,
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: v.active ? Colors.black87 : Colors.black38,
-                              fontStyle: v.active ? FontStyle.normal : FontStyle.italic,
-                            )),
-                        subtitle: Text(v.template,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 11, color: Colors.black38)),
-                        trailing: isSaving
-                            ? const SizedBox(width: 20, height: 20,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
-                            : Row(mainAxisSize: MainAxisSize.min, children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: v.active ? _green.withValues(alpha: 0.12) : Colors.black12,
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Text(v.active ? 'on' : 'off',
-                                      style: TextStyle(
-                                        fontSize: 10,
-                                        color: v.active ? _green : Colors.black38,
-                                        fontWeight: FontWeight.bold,
-                                      )),
-                                ),
-                                const SizedBox(width: 4),
-                                IconButton(
-                                  icon: Icon(Icons.edit_rounded, size: 18, color: Colors.black38),
-                                  tooltip: 'Edit',
-                                  onPressed: () => _editPromptVariant(v),
-                                ),
-                              ]),
-                      );
-                    }).toList(),
-            );
-          }),
-        ],
-      ),
-    );
-  }
+  // ── Prompt Variant editor ────────────────────────────────────────────────
 
   Future<void> _editPromptVariant(PromptVariant variant) async {
     final labelCtrl    = TextEditingController(text: variant.label);
@@ -643,7 +516,7 @@ class _SettingsContentState extends State<SettingsContent> {
                     ),
                     Switch(
                       value: activeValue,
-                      activeColor: _green,
+                      activeThumbColor: _green,
                       onChanged: (v) => setDialogState(() => activeValue = v),
                     ),
                   ],
@@ -714,6 +587,470 @@ class _SettingsContentState extends State<SettingsContent> {
     } finally {
       if (mounted) setState(() => _savingVariant = null);
     }
+  }
+
+  // ── Build ─────────────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    final guides = widget.tourGuides.isNotEmpty ? widget.tourGuides : kFallbackGuides;
+    return Container(
+      color: _cream,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 80),
+        children: [
+          // Header
+          Padding(
+            padding: const EdgeInsets.fromLTRB(0, 20, 0, 0),
+            child: Row(
+              children: const [
+                Icon(Icons.admin_panel_settings_rounded, color: _green, size: 22),
+                SizedBox(width: 8),
+                Text(
+                  'Tour Guides',
+                  style: TextStyle(color: _green, fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 14, bottom: 2),
+            child: Text(
+              'ADMIN',
+              style: TextStyle(
+                color: Colors.black54,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.5,
+              ),
+            ),
+          ),
+          const Text(
+            'Debug Tools',
+            style: TextStyle(color: Colors.black, fontSize: 28, fontWeight: FontWeight.bold, height: 1.1),
+          ),
+          const SizedBox(height: 20),
+
+          _buildSectionHeader('Location Hierarchy'),
+          _buildHierarchyTable(),
+
+          _buildSectionHeader('Clear Data'),
+          _buildActionSetting(
+            label: 'Clear Content Cache',
+            description: 'Delete all generated narration content so everything is regenerated fresh',
+            icon: _clearingContent
+                ? const SizedBox(width: 20, height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
+                : Icon(Icons.auto_delete_rounded, color: Colors.red.shade400),
+            onTap: _clearingContent ? null : _clearContent,
+          ),
+          _buildActionSetting(
+            label: 'Clear Narrations',
+            description: 'Delete all narration queue records from the database (pending and played)',
+            icon: _clearingNarrations
+                ? const SizedBox(width: 20, height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
+                : Icon(Icons.delete_sweep_rounded, color: Colors.red.shade400),
+            onTap: _clearingNarrations ? null : _clearNarrations,
+          ),
+          _buildActionSetting(
+            label: 'Clear Ping History',
+            description: 'Delete all location ping records from the database',
+            icon: _clearingPings
+                ? const SizedBox(width: 20, height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
+                : Icon(Icons.location_off_rounded, color: Colors.red.shade400),
+            onTap: _clearingPings ? null : _clearPings,
+          ),
+          _buildActionSetting(
+            label: 'Clear Cached Tracks',
+            description: 'Delete locally cached music files so they re-download on next start',
+            icon: _clearingTracks
+                ? const SizedBox(width: 20, height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
+                : Icon(Icons.music_off_rounded, color: Colors.red.shade400),
+            onTap: _clearingTracks ? null : _clearTracks,
+          ),
+
+          _buildSectionHeader('Tour Guides'),
+          _buildGuideEditorList(guides),
+
+          _buildSectionHeader('Prompt Variants'),
+          _buildPromptVariantsSection(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGuideEditorList(List<TourGuide> guides) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
+        ],
+      ),
+      child: Column(
+        children: guides.asMap().entries.map((entry) {
+          final idx    = entry.key;
+          final guide  = entry.value;
+          final isLast   = idx == guides.length - 1;
+          final isSaving = _savingGuide == guide.name;
+          return Column(
+            children: [
+              ListTile(
+                title: Text(guide.name,
+                    style: const TextStyle(color: Colors.black87, fontSize: 16)),
+                subtitle: Text(guide.style,
+                    style: const TextStyle(color: Colors.black45, fontSize: 12)),
+                trailing: isSaving
+                    ? const SizedBox(width: 20, height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
+                    : IconButton(
+                        icon: const Icon(Icons.edit_rounded, size: 18, color: Colors.black38),
+                        tooltip: 'Edit personality',
+                        onPressed: () => _editTourGuide(guide),
+                      ),
+              ),
+              if (!isLast)
+                const Divider(height: 1, indent: 16, endIndent: 16, color: Colors.black12),
+            ],
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildPromptVariantsSection() {
+    final variants = widget.promptVariants;
+    final topics = _topicLabels.keys.toList();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
+        ],
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text('Tap a topic to view / edit variants',
+                      style: TextStyle(fontSize: 12, color: Colors.black45)),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 18, color: Colors.black38),
+                  tooltip: 'Refresh',
+                  onPressed: widget.onRefreshPromptVariants,
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1, color: Colors.black12),
+          ...topics.map((topic) {
+            final topicVariants = variants.where((v) => v.topic == topic).toList();
+            return ExpansionTile(
+              title: Text(_topicLabels[topic] ?? topic,
+                  style: const TextStyle(fontSize: 15, color: Colors.black87)),
+              subtitle: Text(
+                  '${topicVariants.length} variant${topicVariants.length == 1 ? '' : 's'}',
+                  style: const TextStyle(fontSize: 12, color: Colors.black45)),
+              shape: const Border(),
+              children: topicVariants.isEmpty
+                  ? [const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text('No variants loaded', style: TextStyle(color: Colors.black38)),
+                    )]
+                  : topicVariants.map((v) {
+                      final isSaving = _savingVariant == v.id;
+                      return ListTile(
+                        dense: true,
+                        title: Text(v.label,
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: v.active ? Colors.black87 : Colors.black38,
+                              fontStyle: v.active ? FontStyle.normal : FontStyle.italic,
+                            )),
+                        subtitle: Text(v.template,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 11, color: Colors.black38)),
+                        trailing: isSaving
+                            ? const SizedBox(width: 20, height: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black38))
+                            : Row(mainAxisSize: MainAxisSize.min, children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: v.active ? _green.withValues(alpha: 0.12) : Colors.black12,
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Text(v.active ? 'on' : 'off',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: v.active ? _green : Colors.black38,
+                                        fontWeight: FontWeight.bold,
+                                      )),
+                                ),
+                                const SizedBox(width: 4),
+                                IconButton(
+                                  icon: const Icon(Icons.edit_rounded, size: 18, color: Colors.black38),
+                                  tooltip: 'Edit',
+                                  onPressed: () => _editPromptVariant(v),
+                                ),
+                              ]),
+                      );
+                    }).toList(),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  static const _hierarchyLevels = [
+    {'key': 'nation',       'label': 'Nation'},
+    {'key': 'region',       'label': 'Region'},
+    {'key': 'state',        'label': 'State'},
+    {'key': 'metro_area',   'label': 'Metro Area'},
+    {'key': 'county',       'label': 'County'},
+    {'key': 'town',         'label': 'Town'},
+    {'key': 'neighborhood', 'label': 'Neighborhood'},
+  ];
+
+  Widget _buildHierarchyTable() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+            child: Row(
+              children: const [
+                SizedBox(width: 92),
+                Expanded(
+                  child: Text('PREVIOUS',
+                      style: TextStyle(color: Colors.black38, fontSize: 9,
+                          fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+                ),
+                Expanded(
+                  child: Text('CURRENT',
+                      style: TextStyle(color: Colors.black38, fontSize: 9,
+                          fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+                ),
+              ],
+            ),
+          ),
+          const Divider(color: Colors.black12, height: 1),
+          ..._hierarchyLevels.map((level) {
+            final key     = level['key']!;
+            final label   = level['label']!;
+            final current  = widget.currentHierarchy?[key]  as String? ?? '';
+            final previous = widget.previousHierarchy?[key] as String? ?? '';
+            final changed  = widget.changedLevels.contains(key);
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 88,
+                    child: Text(label,
+                        style: const TextStyle(color: Colors.black45, fontSize: 11,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                  Expanded(
+                    child: Text(previous.isEmpty ? '—' : previous,
+                        style: const TextStyle(color: Colors.black38, fontSize: 11),
+                        overflow: TextOverflow.ellipsis),
+                  ),
+                  Expanded(
+                    child: Text(
+                      current.isEmpty ? '—' : current,
+                      style: TextStyle(
+                        color: changed ? _green : Colors.black87,
+                        fontSize: 11,
+                        fontWeight: changed ? FontWeight.bold : FontWeight.normal,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+          const SizedBox(height: 4),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionHeader(String title) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 20, bottom: 8),
+      child: Text(
+        title.toUpperCase(),
+        style: const TextStyle(
+          color: Colors.black45,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 1.5,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActionSetting({
+    required String label,
+    required String description,
+    required Widget icon,
+    required VoidCallback? onTap,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
+        ],
+      ),
+      child: ListTile(
+        title: Text(label, style: const TextStyle(color: Colors.black87, fontSize: 16)),
+        subtitle: Text(description,
+            style: const TextStyle(color: Colors.black45, fontSize: 12)),
+        trailing: icon,
+        onTap: onTap,
+      ),
+    );
+  }
+}
+
+// ─── SettingsContent ──────────────────────────────────────────────────────────
+// Simplified settings page: Session, Debug Mode toggle, Music status.
+
+class SettingsContent extends StatefulWidget {
+  final AppSettings settings;
+  final void Function(AppSettings) onChanged;
+  final List<String> cachedMusicTracks;
+
+  const SettingsContent({
+    super.key,
+    required this.settings,
+    required this.onChanged,
+    required this.cachedMusicTracks,
+  });
+
+  @override
+  State<SettingsContent> createState() => _SettingsContentState();
+}
+
+class _SettingsContentState extends State<SettingsContent> {
+  static const Color _green = Color(0xFF3DAA74);
+  static const Color _cream = Color(0xFFF5EDD8);
+
+  late AppSettings _settings;
+
+  @override
+  void initState() {
+    super.initState();
+    _settings = AppSettings(
+      debugMode: widget.settings.debugMode,
+      musicEnabled: widget.settings.musicEnabled,
+    );
+  }
+
+  void _notify() => widget.onChanged(_settings);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: _cream,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 80),
+        children: [
+          // Header
+          Padding(
+            padding: const EdgeInsets.fromLTRB(0, 20, 0, 0),
+            child: Row(
+              children: const [
+                Icon(Icons.directions_bus_rounded, color: _green, size: 22),
+                SizedBox(width: 8),
+                Text(
+                  'Tour Guides',
+                  style: TextStyle(color: _green, fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 14, bottom: 2),
+            child: Text(
+              'SETTINGS',
+              style: TextStyle(
+                color: Colors.black54,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.5,
+              ),
+            ),
+          ),
+          const Text(
+            'Preferences',
+            style: TextStyle(color: Colors.black, fontSize: 28, fontWeight: FontWeight.bold, height: 1.1),
+          ),
+          const SizedBox(height: 20),
+
+          _buildSectionHeader('Session'),
+          _buildActionSetting(
+            label: 'Start New Session',
+            description: 'End the current tour session and begin a fresh one on your next location update',
+            icon: const Icon(Icons.refresh_rounded, color: _green),
+            onTap: () {
+              setState(() => _settings.forceNewSession = true);
+              _notify();
+            },
+          ),
+
+          _buildSectionHeader('Developer'),
+          _buildToggleSetting(
+            label: 'Debug Mode',
+            description: 'Enables the Admin tab with debug tools and configuration',
+            value: _settings.debugMode,
+            onChanged: (val) {
+              setState(() => _settings.debugMode = val);
+              _notify();
+            },
+          ),
+
+          _buildSectionHeader('Music'),
+          _buildToggleSetting(
+            label: 'Background Music',
+            description: 'Play ambient music while touring',
+            value: _settings.musicEnabled,
+            onChanged: (val) {
+              setState(() => _settings.musicEnabled = val);
+              _notify();
+            },
+          ),
+          _buildMusicStatus(),
+        ],
+      ),
+    );
   }
 
   Widget _buildMusicStatus() {

@@ -66,18 +66,6 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 }
 
-// ─── Hierarchy level display names ───────────────────────────────────────────
-
-const List<Map<String, String>> _kHierarchyLevels = [
-  {'key': 'nation',       'label': 'Nation'},
-  {'key': 'region',       'label': 'Region'},
-  {'key': 'state',        'label': 'State'},
-  {'key': 'metro_area',   'label': 'Metro Area'},
-  {'key': 'county',       'label': 'County'},
-  {'key': 'town',         'label': 'Town'},
-  {'key': 'neighborhood', 'label': 'Neighborhood'},
-  {'key': 'landmark',     'label': 'Landmark'},
-];
 
 // ─── HomeScreen ───────────────────────────────────────────────────────────────
 
@@ -95,8 +83,9 @@ class _HomeScreenState extends State<HomeScreen> {
   String _debugMessage = '';
   String _deviceId = '';
 
-  // ── Mode ───────────────────────────────────────────────────────────────────
-  bool _simulationMode = true;
+  // ── Mode / Navigation ──────────────────────────────────────────────────────
+  bool _simulationMode = false;
+  int _selectedIndex = 0;
 
   // ── Location state ──────────────────────────────────────────────────────────
   String _locationText = 'Detecting location...';
@@ -116,14 +105,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Timer? _narrationPollTimer;
 
   // ── Current narration display ──────────────────────────────────────────────
-  String _currentTopic    = '';
   String _currentSubject  = '';
   String _currentNarrator = '';
   String? _currentImageUrl;
   bool _showingNarration  = false; // true only while a narration is actively playing
-
-  // ── Page navigation ────────────────────────────────────────────────────────
-  final PageController _pageController = PageController(initialPage: 1);
 
   // ── Simulation state ────────────────────────────────────────────────────────
   final TextEditingController _startAddressCtrl = TextEditingController(text: 'Los Angeles, CA');
@@ -185,7 +170,6 @@ class _HomeScreenState extends State<HomeScreen> {
     _musicFadeTimer?.cancel();
     _musicDeepDuckTimer?.cancel();
     _musicPlayer.dispose();
-    _pageController.dispose();
     _startAddressCtrl.dispose();
     _endAddressCtrl.dispose();
     _mapController.dispose();
@@ -359,7 +343,6 @@ class _HomeScreenState extends State<HomeScreen> {
           'latitude': lat,
           'longitude': lng,
           'force_new_session': forceNewSession,
-          'preferred_narrators': _settings.preferredNarrators,
         }),
       ).timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) return jsonDecode(response.body);
@@ -388,46 +371,45 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Single dequeue attempt — returns true if audio was played.
   Future<bool> _dequeueAndPlay() async {
-    if (_activeSessionId.isEmpty || !_isNarrating) return false;
+    if (_activeSessionId.isEmpty || !_isNarrating || _narrationPreparing) return false;
+    _narrationPreparing = true; // lock out concurrent calls during HTTP request + setup
     try {
       final response = await http.post(
         Uri.parse('$_backendBase/narration/dequeue'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'session_id': _activeSessionId}),
       ).timeout(const Duration(seconds: 10));
-      if (!_isNarrating) return false;
+      if (!_isNarrating) { _narrationPreparing = false; return false; }
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         if (data['available'] == true) {
-          final topic    = data['topic']    as String? ?? '';
           final subject  = data['subject']  as String? ?? '';
           final narrator = data['narrator'] as String? ?? '';
           setState(() {
-            _currentTopic      = topic;
             _currentSubject    = subject;
             _currentNarrator   = narrator;
             _currentImageUrl   = null;
             _showingNarration  = true;
           });
           _fetchWikipediaImage(subject);
-          _narrationPreparing = true; // block poll from restoring music during fade
           _musicDucked = true;
-          _fadeMusicTo(0.05, milliseconds: 800); // duck music to 5%
-          await Future.delayed(const Duration(milliseconds: 800)); // wait for fade to complete
-          _narrationPreparing = false;
-          if (!_isNarrating) return false; // guard: narration may have been stopped during delay
+          _fadeMusicTo(0.05, milliseconds: 800);
+          await Future.delayed(const Duration(milliseconds: 800));
+          if (!_isNarrating) { _narrationPreparing = false; return false; }
           _musicDeepDuckTimer?.cancel();
           _musicDeepDuckTimer = Timer(const Duration(seconds: 7), () {
-            _fadeMusicTo(0.0, milliseconds: 1500); // fade to silence after 7s of talking
+            _fadeMusicTo(0.0, milliseconds: 1500);
           });
-          _debug('Playing: $topic — $subject');
+          _debug('Playing: $subject');
           await _playAudio(data['audio'] as String);
+          _narrationPreparing = false;
           return true;
         }
       }
     } catch (e) {
       _debug('Dequeue error: $e');
     }
+    _narrationPreparing = false; // no content or error — release the lock
     return false;
   }
 
@@ -511,6 +493,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _startMusic() async {
+    if (!_settings.musicEnabled) return;
     if (_cachedTracks.isEmpty) await _initMusicCache();
     if (_cachedTracks.isEmpty) return;
     _cachedTracks.shuffle();
@@ -567,6 +550,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _restoreMusic() {
     _musicDeepDuckTimer?.cancel();
     _musicDucked = false;
+    if (!_settings.musicEnabled) return;
     _fadeMusicTo(1.0, milliseconds: 2000); // ramp straight back up
     setState(() {
       _showingNarration = false;
@@ -690,7 +674,6 @@ class _HomeScreenState extends State<HomeScreen> {
           _currentHierarchy = null;
           _previousHierarchy = null;
           _changedLevels = [];
-          _currentTopic = '';
           _currentSubject = '';
           _currentNarrator = '';
           _currentImageUrl = null;
@@ -785,8 +768,22 @@ class _HomeScreenState extends State<HomeScreen> {
   // ─── Settings change handler ─────────────────────────────────────────────────
 
   Future<void> _onSettingsChanged(AppSettings updated) async {
-    setState(() => _settings = updated);
+    final wasMusic = _settings.musicEnabled;
+    setState(() {
+      _settings = updated;
+      // If debug mode turned off while on Admin tab (index 4), return to Now Playing
+      if (!updated.debugMode && _selectedIndex >= 4) {
+        _selectedIndex = 0;
+      }
+    });
     await updated.save();
+
+    // Live-respond to music toggle
+    if (wasMusic && !updated.musicEnabled) {
+      _stopMusic();
+    } else if (!wasMusic && updated.musicEnabled && (_isNarrating || _simulationRunning) && !_musicDucked) {
+      _startMusic();
+    }
 
     if (updated.forceNewSession) {
       setState(() => _settings.forceNewSession = false);
@@ -823,28 +820,40 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final showAdmin = _settings.debugMode;
+    final pages = [
+      _buildNowPlayingPage(),
+      _buildTourGuidesPage(),
+      _buildSimulatePage(),
+      _buildSettingsPage(),
+      if (showAdmin) _buildAdminPage(),
+    ];
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: _cream,
       body: SafeArea(
-        child: Stack(
-          children: [
-            PageView(
-              controller: _pageController,
-              children: [
-                _buildDisplayPage(),
-                _buildControlsPage(),
-                _buildSettingsPage(),
-              ],
-            ),
-            Positioned(
-              bottom: 10,
-              left: 0,
-              right: 0,
-              child: _buildPageDots(),
-            ),
-          ],
-        ),
+        child: IndexedStack(index: _selectedIndex, children: pages),
       ),
+      bottomNavigationBar: _buildBottomNav(showAdmin),
+    );
+  }
+
+  Widget _buildBottomNav(bool showAdmin) {
+    return BottomNavigationBar(
+      currentIndex: _selectedIndex,
+      onTap: (i) => setState(() => _selectedIndex = i),
+      type: BottomNavigationBarType.fixed,
+      backgroundColor: _cream,
+      selectedItemColor: _green,
+      unselectedItemColor: Colors.black38,
+      items: [
+        const BottomNavigationBarItem(icon: Icon(Icons.headphones_rounded), label: 'Now Playing'),
+        const BottomNavigationBarItem(icon: Icon(Icons.people_rounded), label: 'Tour Guides'),
+        const BottomNavigationBarItem(icon: Icon(Icons.map_outlined), label: 'Simulate'),
+        const BottomNavigationBarItem(icon: Icon(Icons.settings_rounded), label: 'Settings'),
+        if (showAdmin)
+          const BottomNavigationBarItem(
+              icon: Icon(Icons.admin_panel_settings_rounded), label: 'Admin'),
+      ],
     );
   }
 
@@ -854,7 +863,7 @@ class _HomeScreenState extends State<HomeScreen> {
   static const Color _amber  = Color(0xFFF09840);
   static const Color _cream  = Color(0xFFF5EDD8);
 
-  Widget _buildDisplayPage() {
+  Widget _buildNowPlayingPage() {
     // mapMode: between narrations / idle — show live map
     // narration active but no image: show "no image" placeholder
     // narration active with image: show Wikipedia image
@@ -868,13 +877,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ? _locationText
           : 'Ready to Explore';
     } else {
-      switch (_currentTopic) {
-        case 'intro':         topicLabel = 'STARTING YOUR JOURNEY'; break;
-        case 'state_change':  topicLabel = 'ENTERING A NEW STATE';  break;
-        case 'nation_change': topicLabel = 'CROSSING A BORDER';     break;
-        case 'dwell':         topicLabel = 'NEARBY LANDMARK';       break;
-        default:              topicLabel = 'NOW EXPLORING';
-      }
+      topicLabel  = 'NEARBY LANDMARK';
       subjectText = _currentSubject.isNotEmpty ? _currentSubject : 'Ready to Explore';
     }
 
@@ -890,7 +893,15 @@ class _HomeScreenState extends State<HomeScreen> {
     } else {
       startAction = _startNarration;
     }
-    final VoidCallback stopAction = _simulationMode ? _stopSimulation : _stopNarration;
+    final VoidCallback stopAction;
+    if (_simulationMode) {
+      stopAction = () {
+        _stopSimulation();
+        setState(() => _selectedIndex = 2);
+      };
+    } else {
+      stopAction = _stopNarration;
+    }
 
     return Container(
       color: _cream,
@@ -905,7 +916,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const Icon(Icons.directions_bus_rounded, color: _green, size: 22),
                 const SizedBox(width: 8),
                 const Text(
-                  'Tour Guide',
+                  'Tour Guides',
                   style: TextStyle(color: _green, fontSize: 18, fontWeight: FontWeight.bold),
                 ),
               ],
@@ -983,52 +994,85 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
 
-          // ── Start / Stop Tour button ────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-            child: SizedBox(
-              width: double.infinity,
-              height: 56,
-              child: ElevatedButton.icon(
-                onPressed: isActive ? stopAction : startAction,
-                icon: Icon(isActive ? Icons.stop_rounded : Icons.play_arrow_rounded, size: 22),
-                label: Text(
-                  isActive ? 'Stop Tour' : 'Start Tour',
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _green,
-                  foregroundColor: Colors.white,
-                  disabledBackgroundColor: Colors.grey.shade300,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
-                  elevation: 3,
-                  shadowColor: _green.withValues(alpha: 0.4),
-                ),
-              ),
-            ),
-          ),
-
-          // ── Bottom 3 cards ──────────────────────────────────────────────
+          // ── Start / Stop Tour + Skip row ────────────────────────────────
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 28),
             child: Row(
               children: [
-                _buildDisplayCard(
-                  Icons.tune_rounded, 'Controls',
-                  () => _pageController.animateToPage(1,
-                      duration: const Duration(milliseconds: 300), curve: Curves.easeInOut),
-                ),
-                const SizedBox(width: 12),
-                _buildDisplayCard(
-                  Icons.skip_next_rounded, 'Skip',
-                  audioPlaying ? _skipNarration : null,
-                ),
-                const SizedBox(width: 12),
-                _buildDisplayCard(
-                  Icons.settings_rounded, 'Settings',
-                  () => _pageController.animateToPage(2,
-                      duration: const Duration(milliseconds: 300), curve: Curves.easeInOut),
-                ),
+                if (isActive) ...[
+                  // Tour active: Skip is primary (large), Stop is secondary (small, red)
+                  Expanded(
+                    flex: 3,
+                    child: SizedBox(
+                      height: 56,
+                      child: ElevatedButton.icon(
+                        onPressed: audioPlaying ? _skipNarration : null,
+                        icon: const Icon(Icons.skip_next_rounded, size: 22),
+                        label: const Text('Skip', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _amber,
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor: Colors.grey.shade300,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+                          elevation: 3,
+                          shadowColor: _amber.withValues(alpha: 0.4),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  SizedBox(
+                    height: 56,
+                    width: 80,
+                    child: ElevatedButton(
+                      onPressed: stopAction,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red.shade600,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+                        elevation: 0,
+                      ),
+                      child: const Icon(Icons.stop_rounded, size: 26),
+                    ),
+                  ),
+                ] else ...[
+                  // Tour inactive: Start is primary (large), Skip is disabled (small)
+                  Expanded(
+                    flex: 3,
+                    child: SizedBox(
+                      height: 56,
+                      child: ElevatedButton.icon(
+                        onPressed: startAction,
+                        icon: const Icon(Icons.play_arrow_rounded, size: 22),
+                        label: const Text('Start Tour', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _green,
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor: Colors.grey.shade300,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+                          elevation: 3,
+                          shadowColor: _green.withValues(alpha: 0.4),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  SizedBox(
+                    height: 56,
+                    width: 80,
+                    child: ElevatedButton(
+                      onPressed: null,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _amber,
+                        foregroundColor: Colors.white,
+                        disabledBackgroundColor: Colors.grey.shade300,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+                        elevation: 0,
+                      ),
+                      child: const Icon(Icons.skip_next_rounded, size: 26),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1135,53 +1179,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildDisplayCard(IconData icon, String label, VoidCallback? onTap) {
-    final bool enabled = onTap != null;
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(16),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.06),
-                blurRadius: 8,
-                offset: const Offset(0, 2),
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 44, height: 44,
-                decoration: BoxDecoration(
-                  color: enabled
-                      ? _amber.withValues(alpha: 0.18)
-                      : Colors.grey.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(icon,
-                    color: enabled ? _amber : Colors.grey.shade400, size: 22),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: enabled ? Colors.black87 : Colors.grey.shade400,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 
   Widget _buildDisplayMap() {
     // Determine map center: use stored position, or first simulation waypoint, or default
@@ -1241,9 +1238,9 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ─── Page 1: Controls ───────────────────────────────────────────────────────
+  // ─── Simulate page ───────────────────────────────────────────────────────────
 
-  Widget _buildControlsPage() {
+  Widget _buildSimulatePage() {
     return Container(
       color: _cream,
       child: SingleChildScrollView(
@@ -1258,17 +1255,19 @@ class _HomeScreenState extends State<HomeScreen> {
                   const Icon(Icons.directions_bus_rounded, color: _green, size: 22),
                   const SizedBox(width: 8),
                   const Text(
-                    'Tour Guide',
+                    'Tour Guides',
                     style: TextStyle(color: _green, fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                 ],
               ),
             ),
             _buildTopSection(),
-            _buildHierarchyPanel(),
-            _buildModeToggle(),
-            if (_simulationMode) _buildSimulationControls(),
-            _buildBottomSection(),
+            _buildSimulationModeToggle(),
+            if (_simulationMode) ...[
+              _buildStatusBanner(),
+              _buildSimulationControls(),
+              _buildBottomSection(),
+            ],
             if (_settings.debugMode)
               Container(
                 margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -1299,42 +1298,9 @@ class _HomeScreenState extends State<HomeScreen> {
       settings: _settings,
       onChanged: _onSettingsChanged,
       cachedMusicTracks: _cachedTracks,
-      onClearTracks: _clearCachedTracks,
-      tourGuides: _tourGuides,
-      onRefreshTourGuides: _fetchTourGuides,
-      promptVariants: _promptVariants,
-      onRefreshPromptVariants: _fetchPromptVariants,
     );
   }
 
-  // ─── Page dots indicator ────────────────────────────────────────────────────
-
-  Widget _buildPageDots() {
-    return AnimatedBuilder(
-      animation: _pageController,
-      builder: (context, _) {
-        final page = _pageController.hasClients ? (_pageController.page?.round() ?? 1) : 1;
-        return Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: List.generate(3, (i) {
-            final active = i == page;
-            return AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              margin: const EdgeInsets.symmetric(horizontal: 4),
-              width: active ? 10 : 6,
-              height: active ? 10 : 6,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: active
-                    ? _green
-                    : Colors.black.withValues(alpha: 0.2),
-              ),
-            );
-          }),
-        );
-      },
-    );
-  }
 
   Widget _buildTopSection() {
     return Padding(
@@ -1351,47 +1317,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ─── Mode toggle ─────────────────────────────────────────────────────────────
-
-  Widget _buildModeToggle() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
-        children: [
-          Expanded(child: _buildToggleButton(label: 'GPS',      active: !_simulationMode, onTap: () => _switchMode(false))),
-          const SizedBox(width: 8),
-          Expanded(child: _buildToggleButton(label: 'SIMULATE', active:  _simulationMode, onTap: () => _switchMode(true))),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildToggleButton({required String label, required bool active, required VoidCallback onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        decoration: BoxDecoration(
-          color: active ? _green : Colors.white,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: active ? _green : Colors.black12),
-          boxShadow: active ? [
-            BoxShadow(color: _green.withValues(alpha: 0.25), blurRadius: 6, offset: const Offset(0, 2)),
-          ] : null,
-        ),
-        child: Text(
-          label,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: active ? Colors.white : Colors.black54,
-            fontSize: 13,
-            fontWeight: active ? FontWeight.bold : FontWeight.normal,
-            letterSpacing: 1.0,
-          ),
-        ),
-      ),
-    );
-  }
 
   // ─── Simulation controls ─────────────────────────────────────────────────────
 
@@ -1574,118 +1499,84 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ─── Hierarchy diagnostic panel ──────────────────────────────────────────────
+  // ─── Tour Guides page ─────────────────────────────────────────────────────────
 
-  Widget _buildHierarchyPanel() {
-    if (_currentHierarchy == null) return const SizedBox.shrink();
+  Widget _buildTourGuidesPage() {
+    return TourGuidesScreen(
+      guides: _tourGuides,
+      onRefresh: _fetchTourGuides,
+    );
+  }
 
+  // ─── Admin page ───────────────────────────────────────────────────────────────
+
+  Widget _buildAdminPage() {
+    return AdminContent(
+      tourGuides: _tourGuides,
+      onRefreshTourGuides: _fetchTourGuides,
+      promptVariants: _promptVariants,
+      onRefreshPromptVariants: _fetchPromptVariants,
+      onClearTracks: _clearCachedTracks,
+      currentHierarchy: _currentHierarchy,
+      previousHierarchy: _previousHierarchy,
+      changedLevels: _changedLevels,
+    );
+  }
+
+  // ─── Simulation mode toggle ───────────────────────────────────────────────────
+
+  Widget _buildSimulationModeToggle() {
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(14),
         boxShadow: [
           BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
         ],
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-            child: Row(
-              children: [
-                const SizedBox(width: 88),
-                Expanded(
-                  child: Text(
-                    'PREVIOUS',
-                    style: TextStyle(
-                      color: Colors.black38,
-                      fontSize: 9,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.2,
-                    ),
-                  ),
-                ),
-                Expanded(
-                  child: Text(
-                    'CURRENT',
-                    style: TextStyle(
-                      color: Colors.black38,
-                      fontSize: 9,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.2,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const Divider(color: Colors.black12, height: 1),
-          ..._kHierarchyLevels.map((level) => _buildHierarchyRow(
-            label: level['label']!,
-            key: level['key']!,
-          )),
-          const SizedBox(height: 4),
-        ],
+      child: SwitchListTile(
+        value: _simulationMode,
+        onChanged: _switchMode,
+        title: const Text('Simulation Mode', style: TextStyle(fontWeight: FontWeight.w600)),
+        subtitle: Text(
+          _simulationMode
+              ? 'GPS paused — using simulated route'
+              : 'GPS active — real location tracking',
+        ),
+        activeThumbColor: _green,
+        contentPadding: EdgeInsets.zero,
       ),
     );
   }
 
-  Widget _buildHierarchyRow({required String label, required String key}) {
-    final current  = _currentHierarchy?[key]  as String? ?? '';
-    final previous = _previousHierarchy?[key] as String? ?? '';
-    final changed  = _changedLevels.contains(key);
+  // ─── Status banner (Simulate page) ───────────────────────────────────────────
 
-    final rowColor   = changed ? _amber.withValues(alpha: 0.10) : Colors.transparent;
-    final valueColor = changed ? _amber.withValues(alpha: 0.85) : Colors.black54;
+  Widget _buildStatusBanner() {
+    if (_simulationRunning) {
+      return _buildBannerWidget('Simulation Active', Icons.science_rounded, Colors.amber);
+    }
+    return const SizedBox.shrink();
+  }
 
+  Widget _buildBannerWidget(String text, IconData icon, Color color) {
     return Container(
-      color: rowColor,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
+      ),
       child: Row(
         children: [
-          SizedBox(
-            width: 80,
-            child: Row(
-              children: [
-                if (changed)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 4),
-                    child: Icon(Icons.star, color: _amber, size: 10),
-                  )
-                else
-                  const SizedBox(width: 14),
-                Text(
-                  label,
-                  style: const TextStyle(color: Colors.black45, fontSize: 11, fontWeight: FontWeight.w500),
-                ),
-              ],
-            ),
-          ),
+          Icon(icon, color: color, size: 16),
+          const SizedBox(width: 8),
           Expanded(
             child: Text(
-              previous.isNotEmpty ? previous : '—',
-              style: const TextStyle(color: Colors.black38, fontSize: 11),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          if (changed)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Icon(Icons.arrow_forward, color: _amber.withValues(alpha: 0.7), size: 10),
-            )
-          else
-            const SizedBox(width: 18),
-          Expanded(
-            child: Text(
-              current.isNotEmpty ? current : '—',
-              style: TextStyle(
-                color: valueColor,
-                fontSize: 11,
-                fontWeight: changed ? FontWeight.bold : FontWeight.normal,
-              ),
-              overflow: TextOverflow.ellipsis,
+              text,
+              style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w500),
             ),
           ),
         ],
@@ -1708,15 +1599,9 @@ class _HomeScreenState extends State<HomeScreen> {
         _audioPlayer.playing &&
         _audioPlayer.processingState != ProcessingState.completed &&
         _audioPlayer.processingState != ProcessingState.idle;
-    final bool isActive = _simulationMode ? _simulationRunning : _isNarrating;
-
-    VoidCallback? startAction;
-    if (_simulationMode) {
-      startAction = _routeWaypoints.isNotEmpty ? _startSimulation : null;
-    } else {
-      startAction = _startNarration;
-    }
-    final VoidCallback stopAction = _simulationMode ? _stopSimulation : _stopNarration;
+    final bool isActive = _simulationRunning;
+    final VoidCallback? startAction =
+        _routeWaypoints.isNotEmpty ? _startSimulation : null;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
@@ -1727,10 +1612,10 @@ class _HomeScreenState extends State<HomeScreen> {
             child: SizedBox(
               height: 52,
               child: ElevatedButton.icon(
-                onPressed: isActive ? stopAction : startAction,
+                onPressed: isActive ? _stopSimulation : startAction,
                 icon: Icon(isActive ? Icons.stop_rounded : Icons.play_arrow_rounded, size: 20),
                 label: Text(
-                  isActive ? 'Stop Tour' : 'Start Tour',
+                  isActive ? 'Stop Simulation' : 'Start Simulation',
                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 ),
                 style: ElevatedButton.styleFrom(
