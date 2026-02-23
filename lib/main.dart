@@ -16,6 +16,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'settings.dart';
 import 'auth_service.dart';
+import 'firebase_options.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,9 +25,9 @@ void main() async {
   // lib/firebase_options.dart. If those files aren't present yet, Firebase
   // initializes without options (will fail silently for auth calls).
   try {
-    await Firebase.initializeApp();
+    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   } catch (_) {
-    // firebase_options.dart not generated yet — auth will be no-op until configured
+    // fallback if options unavailable
   }
   runApp(const TourGuideApp());
 }

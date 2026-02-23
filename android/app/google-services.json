@@ -1,0 +1,46 @@
+{
+  "project_info": {
+    "project_number": "940376231423",
+    "project_id": "fc-tour-guides",
+    "storage_bucket": "fc-tour-guides.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:940376231423:android:1f50b66135f3a7f0c5abca",
+        "android_client_info": {
+          "package_name": "com.example.tour_guide"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "940376231423-0rc8t5dt1cj3fji04q7bl70k25sn09b2.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDZTFVrZ9dPJheKejmCMQGT0VcF1ITPWOw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "940376231423-0rc8t5dt1cj3fji04q7bl70k25sn09b2.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "940376231423-1i56a9fh5k5nuk4j957v1q23kdsm03r0.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.tourGuide"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
