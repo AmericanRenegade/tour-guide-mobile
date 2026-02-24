@@ -94,20 +94,18 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ── Settings + device ──────────────────────────────────────────────────────
   AppSettings _settings = AppSettings();
-  String _debugMessage = '';
   String _deviceId = '';
 
-  // ── Mode / Navigation ──────────────────────────────────────────────────────
-  bool _simulationMode = false;
+  // ── Navigation ─────────────────────────────────────────────────────────────
   int _selectedIndex = 0;
 
-  // ── Location state ──────────────────────────────────────────────────────────
+  // ── Location state ─────────────────────────────────────────────────────────
   String _locationText = 'Detecting location...';
   double? _currentLat;
   double? _currentLng;
   Timer? _pingTimer;
 
-  // ── Hierarchy diagnostic state ─────────────────────────────────────────────
+  // ── Hierarchy diagnostic state (for Admin tab) ─────────────────────────────
   Map<String, dynamic>? _currentHierarchy;
   Map<String, dynamic>? _previousHierarchy;
   List<String> _changedLevels = [];
@@ -115,8 +113,6 @@ class _HomeScreenState extends State<HomeScreen> {
   // ── Narration state ────────────────────────────────────────────────────────
   String _activeSessionId = '';
   bool _isNarrating = false;
-  bool _narrationPreparing = false; // true during the 800ms fade-before-audio window
-  Timer? _narrationPollTimer;
 
   // ── Current narration display ──────────────────────────────────────────────
   String _currentSubject  = '';
@@ -124,27 +120,12 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _currentImageUrl;
   bool _showingNarration  = false; // true only while a narration is actively playing
 
-  // ── Simulation state ────────────────────────────────────────────────────────
-  final TextEditingController _startAddressCtrl = TextEditingController(text: 'Los Angeles, CA');
-  final TextEditingController _endAddressCtrl   = TextEditingController(text: 'San Francisco, CA');
-  final MapController _mapController = MapController();
+  // ── Display map ────────────────────────────────────────────────────────────
   final MapController _displayMapController = MapController();
-  List<Map<String, double>> _routeWaypoints     = [];
-  int  _waypointIndex    = 0;
-  bool _isLoadingRoute   = false;
-  bool _simulationRunning = false;
 
-  // ── Shared ─────────────────────────────────────────────────────────────────
+  // ── Audio ──────────────────────────────────────────────────────────────────
   final AudioPlayer _audioPlayer = AudioPlayer();
   StreamSubscription<PlayerState>? _playerStateSub;
-
-  // ── User preferences ────────────────────────────────────────────────────────
-  String _prefDefaultState = 'MD';
-  int    _prefMinScore      = 7;
-
-  // ── Tour guides ─────────────────────────────────────────────────────────────
-  List<TourGuide> _tourGuides = [];
-  List<PromptVariant> _promptVariants = [];
 
   // ── Background music ────────────────────────────────────────────────────────
   final AudioPlayer _musicPlayer = AudioPlayer();
@@ -155,7 +136,14 @@ class _HomeScreenState extends State<HomeScreen> {
   Timer? _musicFadeTimer;
   Timer? _musicDeepDuckTimer;
   bool _musicDucked = false;
-  DateTime? _nextNarrationAllowedAt;
+
+  // ── User preferences ────────────────────────────────────────────────────────
+  String _prefDefaultState = 'MD';
+  int    _prefMinScore      = 7;
+
+  // ── Tour guides + prompt variants ──────────────────────────────────────────
+  List<TourGuide> _tourGuides = [];
+  List<PromptVariant> _promptVariants = [];
 
   static const Duration _pingInterval = Duration(seconds: 15);
   static const String _backendBase = 'https://tour-guide-backend-production.up.railway.app';
@@ -163,8 +151,14 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _playerStateSub = _audioPlayer.playerStateStream.listen((_) {
-      if (mounted) setState(() {});
+    // Narration audio completion → restore music automatically
+    _playerStateSub = _audioPlayer.playerStateStream.listen((state) {
+      if (!mounted) return;
+      setState(() {});
+      if (_showingNarration && _musicDucked &&
+          state.processingState == ProcessingState.completed) {
+        _restoreMusic();
+      }
     });
     _musicStateSub = _musicPlayer.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed) {
@@ -173,7 +167,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
     _initFirebaseAuth();    // anonymous sign-in + backend user sync
     _loadSettings();
-    if (!_simulationMode) _startLocationTracking();
+    _startLocationTracking();
     _initMusicCache();      // pre-download tracks in background
     _fetchTourGuides();       // load guide list (with personality) from backend
     _fetchPromptVariants();   // load prompt variant templates from backend
@@ -182,7 +176,6 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _pingTimer?.cancel();
-    _narrationPollTimer?.cancel();
     _audioPlayer.dispose();
     _playerStateSub?.cancel();
     _musicStateSub?.cancel();
@@ -190,9 +183,6 @@ class _HomeScreenState extends State<HomeScreen> {
     _musicFadeTimer?.cancel();
     _musicDeepDuckTimer?.cancel();
     _musicPlayer.dispose();
-    _startAddressCtrl.dispose();
-    _endAddressCtrl.dispose();
-    _mapController.dispose();
     super.dispose();
   }
 
@@ -402,7 +392,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     // Then ping every 15 seconds
     _pingTimer = Timer.periodic(_pingInterval, (_) async {
-      if (_simulationMode) return; // don't GPS-ping while simulating
       try {
         final position = await Geolocator.getCurrentPosition(
           locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
@@ -414,7 +403,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  // ─── Core location update handler (GPS and simulation share this) ────────────
+  // ─── Core location update handler ────────────────────────────────────────────
 
   Future<void> _handleLocationUpdate(double lat, double lng, {bool forceNewSession = false}) async {
     final pingData = await _ping(lat, lng, forceNewSession: forceNewSession);
@@ -422,7 +411,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final newLocationName = pingData['location_name'] ?? '';
     final sessionId = pingData['session_id'] as String? ?? '';
-    _debug('Ping: $newLocationName | changed: ${(pingData['changed_levels'] as List?)?.join(', ')}');
+    _debug('Ping: $newLocationName');
 
     setState(() {
       if (sessionId.isNotEmpty) _activeSessionId = sessionId;
@@ -441,6 +430,11 @@ class _HomeScreenState extends State<HomeScreen> {
       _displayMapController.move(LatLng(lat, lng), _displayMapController.camera.zoom);
     } catch (_) {} // controller not yet attached to a widget
 
+    // If the ping returned a narration, play it immediately (tour must be active and audio idle)
+    final narrationData = pingData['narration'];
+    if (narrationData != null && _isNarrating && !_audioPlayer.playing) {
+      await _playNarrationFromPing(Map<String, dynamic>.from(narrationData as Map));
+    }
   }
 
   // ─── /ping ───────────────────────────────────────────────────────────────────
@@ -486,50 +480,32 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // ─── Narration engine ────────────────────────────────────────────────────────
+  // ─── Play narration delivered directly from ping response ────────────────────
 
-  /// Single dequeue attempt — returns true if audio was played.
-  Future<bool> _dequeueAndPlay() async {
-    if (_activeSessionId.isEmpty || !_isNarrating || _narrationPreparing) return false;
-    _narrationPreparing = true; // lock out concurrent calls during HTTP request + setup
-    try {
-      final response = await http.post(
-        Uri.parse('$_backendBase/narration/dequeue'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'session_id': _activeSessionId}),
-      ).timeout(const Duration(seconds: 10));
-      if (!_isNarrating) { _narrationPreparing = false; return false; }
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (data['available'] == true) {
-          final subject  = data['subject']  as String? ?? '';
-          final narrator = data['narrator'] as String? ?? '';
-          setState(() {
-            _currentSubject    = subject;
-            _currentNarrator   = narrator;
-            _currentImageUrl   = null;
-            _showingNarration  = true;
-          });
-          _fetchWikipediaImage(subject);
-          _musicDucked = true;
-          _fadeMusicTo(0.05, milliseconds: 800);
-          await Future.delayed(const Duration(milliseconds: 800));
-          if (!_isNarrating) { _narrationPreparing = false; return false; }
-          _musicDeepDuckTimer?.cancel();
-          _musicDeepDuckTimer = Timer(const Duration(seconds: 7), () {
-            _fadeMusicTo(0.0, milliseconds: 1500);
-          });
-          _debug('Playing: $subject');
-          await _playAudio(data['audio'] as String);
-          _narrationPreparing = false;
-          return true;
-        }
-      }
-    } catch (e) {
-      _debug('Dequeue error: $e');
-    }
-    _narrationPreparing = false; // no content or error — release the lock
-    return false;
+  Future<void> _playNarrationFromPing(Map<String, dynamic> narration) async {
+    final subject = narration['subject'] as String? ?? '';
+    final narrator = narration['narrator'] as String? ?? '';
+    final audio = narration['audio'] as String?;
+    if (audio == null || audio.isEmpty) return;
+
+    setState(() {
+      _currentSubject   = subject;
+      _currentNarrator  = narrator;
+      _currentImageUrl  = null;
+      _showingNarration = true;
+    });
+    _fetchWikipediaImage(subject);
+    _musicDucked = true;
+    _fadeMusicTo(0.05, milliseconds: 800);
+    await Future.delayed(const Duration(milliseconds: 800));
+    if (!_isNarrating) return; // tour was stopped during the fade
+    _musicDeepDuckTimer?.cancel();
+    _musicDeepDuckTimer = Timer(const Duration(seconds: 7), () {
+      _fadeMusicTo(0.0, milliseconds: 1500);
+    });
+    _debug('Playing: $subject');
+    await _playAudio(audio);
+    // Music is restored automatically via _playerStateSub when processingState → completed
   }
 
   Future<void> _fetchWikipediaImage(String subject) async {
@@ -670,37 +646,14 @@ class _HomeScreenState extends State<HomeScreen> {
     _musicDeepDuckTimer?.cancel();
     _musicDucked = false;
     if (!_settings.musicEnabled) return;
-    _fadeMusicTo(1.0, milliseconds: 2000); // ramp straight back up
+    _fadeMusicTo(1.0, milliseconds: 2000);
     setState(() {
       _showingNarration = false;
       _currentImageUrl  = null; // clear stale image so map reappears
     });
   }
 
-  void _startNarrationPoll() {
-    _narrationPollTimer?.cancel();
-    _narrationPollTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
-      // playing stays true even after audio finishes — check processingState too
-      final audioIdle = !_audioPlayer.playing ||
-          _audioPlayer.processingState == ProcessingState.completed ||
-          _audioPlayer.processingState == ProcessingState.idle;
-      if (!_isNarrating || !audioIdle) return;
-
-      // Narration just ended — restore music unless we're mid-setup for the next one
-      if (_musicDucked && !_narrationPreparing) {
-        _restoreMusic();
-        _nextNarrationAllowedAt = DateTime.now().add(const Duration(seconds: 7));
-        return;
-      }
-
-      // Cooldown elapsed — try to dequeue the next narration
-      final cooldownOk = _nextNarrationAllowedAt == null ||
-          DateTime.now().isAfter(_nextNarrationAllowedAt!);
-      if (cooldownOk) {
-        await _dequeueAndPlay();
-      }
-    });
-  }
+  // ─── Narration start / stop ──────────────────────────────────────────────────
 
   Future<void> _startNarration() async {
     WakelockPlus.enable();
@@ -715,14 +668,11 @@ class _HomeScreenState extends State<HomeScreen> {
         debugPrint('Position error before narration: $e');
       }
     }
-    _startNarrationPoll();
     _startMusic();
   }
 
   void _stopNarration() {
-    _narrationPollTimer?.cancel();
     _musicDeepDuckTimer?.cancel();
-    _narrationPreparing = false;
     _musicDucked = false;
     _audioPlayer.stop();
     _stopMusic();
@@ -734,164 +684,14 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  // ─── Mode switching ──────────────────────────────────────────────────────────
-
-  void _switchMode(bool toSimulation) {
-    if (_simulationMode == toSimulation) return;
-    _pingTimer?.cancel();
-    _narrationPollTimer?.cancel();
-    _audioPlayer.stop();
-    _stopMusic();
-    WakelockPlus.disable();
-    setState(() {
-      _simulationMode = toSimulation;
-      _simulationRunning = false;
-      _isNarrating = false;
-    });
-    if (!toSimulation) _startLocationTracking();
-  }
-
-  // ─── Simulation ──────────────────────────────────────────────────────────────
-
-  Future<void> _fetchRoute() async {
-    final start = _startAddressCtrl.text.trim();
-    final end = _endAddressCtrl.text.trim();
-    if (start.isEmpty || end.isEmpty) return;
-
-    setState(() {
-      _isLoadingRoute = true;
-      _routeWaypoints = [];
-      _waypointIndex = 0;
-      _locationText = 'Loading route...';
-    });
-
-    try {
-      final response = await http.post(
-        Uri.parse('$_backendBase/route'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'start_address': start,
-          'end_address': end,
-          'speed_mph': 45.0,
-        }),
-      ).timeout(const Duration(seconds: 30));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final waypoints = (data['waypoints'] as List)
-            .map<Map<String, double>>((w) => {
-                  'lat': (w['lat'] as num).toDouble(),
-                  'lng': (w['lng'] as num).toDouble(),
-                })
-            .toList();
-
-        // Reset all state for a fresh simulation
-        setState(() {
-          _routeWaypoints = waypoints;
-          _waypointIndex = 0;
-          _locationText = 'Setting up route...';
-          _currentHierarchy = null;
-          _previousHierarchy = null;
-          _changedLevels = [];
-          _currentSubject = '';
-          _currentNarrator = '';
-          _currentImageUrl = null;
-        });
-
-        // 1. Clear old narrations first (so the new session's intro isn't wiped)
-        try {
-          await http.post(Uri.parse('$_backendBase/debug/clear-narrations'));
-        } catch (e) {
-          _debug('Clear narrations error: $e');
-        }
-
-        // 2. Ping the starting waypoint with forceNewSession to create a fresh session
-        //    and generate the intro narration
-        await _handleLocationUpdate(
-          waypoints.first['lat']!,
-          waypoints.first['lng']!,
-          forceNewSession: true,
-        );
-
-        _debug('Route: ${waypoints.length} waypoints from $start → $end — new session ready');
-      } else if (response.statusCode == 404) {
-        setState(() => _locationText = 'Route not found');
-      } else {
-        setState(() => _locationText = 'Route error');
-        _debug('Route error: HTTP ${response.statusCode}');
-      }
-    } catch (e) {
-      setState(() => _locationText = 'Route error');
-      debugPrint('Route fetch error: $e');
-    } finally {
-      setState(() => _isLoadingRoute = false);
-    }
-  }
-
-  void _startSimulation() {
-    if (_routeWaypoints.isEmpty) return;
-    setState(() {
-      _simulationRunning = true;
-      _isNarrating = true;
-    });
-    WakelockPlus.enable();
-    _startNarrationPoll();
-    _startMusic();
-    _stepSimulationWithIntro();
-    _pingTimer = Timer.periodic(_pingInterval, (_) => _stepSimulation());
-  }
-
-  Future<void> _stepSimulationWithIntro() async {
-    if (_waypointIndex >= _routeWaypoints.length) return;
-    final wp = _routeWaypoints[_waypointIndex];
-    _waypointIndex++;
-    _panMapToWaypoint(wp);
-    await _handleLocationUpdate(wp['lat']!, wp['lng']!);
-  }
-
-  void _stopSimulation() {
-    _pingTimer?.cancel();
-    _narrationPollTimer?.cancel();
-    _musicDeepDuckTimer?.cancel();
-    _narrationPreparing = false;
-    _musicDucked = false;
-    _audioPlayer.stop();
-    _stopMusic();
-    WakelockPlus.disable();
-    setState(() {
-      _simulationRunning = false;
-      _isNarrating       = false;
-      _showingNarration  = false;
-      _currentImageUrl   = null;
-    });
-  }
-
-  void _panMapToWaypoint(Map<String, double> wp) {
-    try {
-      _mapController.move(LatLng(wp['lat']!, wp['lng']!), 10);
-    } catch (_) {}
-  }
-
-  void _stepSimulation() {
-    if (_waypointIndex >= _routeWaypoints.length) {
-      _stopSimulation();
-      setState(() => _locationText = 'Route complete');
-      return;
-    }
-    final wp = _routeWaypoints[_waypointIndex];
-    _waypointIndex++;
-    _panMapToWaypoint(wp);
-    _handleLocationUpdate(wp['lat']!, wp['lng']!);
-  }
-
   // ─── Settings change handler ─────────────────────────────────────────────────
 
   Future<void> _onSettingsChanged(AppSettings updated) async {
     final wasMusic = _settings.musicEnabled;
     setState(() {
       _settings = updated;
-      // If debug mode turned off while on Admin tab (index 4), return to Now Playing
-      if (!updated.debugMode && _selectedIndex >= 4) {
+      // If debug mode turned off while on Admin tab (index 3), return to Now Playing
+      if (!updated.debugMode && _selectedIndex >= 3) {
         _selectedIndex = 0;
       }
     });
@@ -900,26 +700,17 @@ class _HomeScreenState extends State<HomeScreen> {
     // Live-respond to music toggle
     if (wasMusic && !updated.musicEnabled) {
       _stopMusic();
-    } else if (!wasMusic && updated.musicEnabled && (_isNarrating || _simulationRunning) && !_musicDucked) {
+    } else if (!wasMusic && updated.musicEnabled && _isNarrating && !_musicDucked) {
       _startMusic();
     }
 
     if (updated.forceNewSession) {
       setState(() => _settings.forceNewSession = false);
       try {
-        double lat, lng;
-        if (_simulationMode && _routeWaypoints.isNotEmpty) {
-          final wp = _routeWaypoints[_waypointIndex.clamp(0, _routeWaypoints.length - 1)];
-          lat = wp['lat']!;
-          lng = wp['lng']!;
-        } else {
-          final position = await Geolocator.getCurrentPosition(
-            locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-          );
-          lat = position.latitude;
-          lng = position.longitude;
-        }
-        await _ping(lat, lng, forceNewSession: true);
+        final position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        );
+        await _ping(position.latitude, position.longitude, forceNewSession: true);
         _debug('New session started');
       } catch (e) {
         debugPrint('Force new session error: $e');
@@ -931,7 +722,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _debug(String message) {
     if (_settings.debugMode) {
-      setState(() => _debugMessage = message);
+      debugPrint('[TourGuide] $message');
     }
   }
 
@@ -943,7 +734,6 @@ class _HomeScreenState extends State<HomeScreen> {
     final pages = [
       _buildNowPlayingPage(),
       _buildTourGuidesPage(),
-      _buildSimulatePage(),
       _buildSettingsPage(),
       if (showAdmin) _buildAdminPage(),
     ];
@@ -967,7 +757,6 @@ class _HomeScreenState extends State<HomeScreen> {
       items: [
         const BottomNavigationBarItem(icon: Icon(Icons.headphones_rounded), label: 'Now Playing'),
         const BottomNavigationBarItem(icon: Icon(Icons.people_rounded), label: 'Tour Guides'),
-        const BottomNavigationBarItem(icon: Icon(Icons.map_outlined), label: 'Simulate'),
         const BottomNavigationBarItem(icon: Icon(Icons.settings_rounded), label: 'Settings'),
         if (showAdmin)
           const BottomNavigationBarItem(
@@ -976,7 +765,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ─── Page 0: Now Playing display ────────────────────────────────────────────
+  // ─── Page 0: Now Playing ────────────────────────────────────────────────────
 
   static const Color _green  = Color(0xFF3DAA74);
   static const Color _amber  = Color(0xFFF09840);
@@ -984,7 +773,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildNowPlayingPage() {
     // mapMode: between narrations / idle — show live map
-    // narration active but no image: show "no image" placeholder
     // narration active with image: show Wikipedia image
     final bool mapMode = !_showingNarration;
 
@@ -992,7 +780,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final String subjectText;
     if (mapMode) {
       topicLabel  = 'NOW EXPLORING';
-      subjectText = (_currentHierarchy != null && !_locationText.contains('...') && !_locationText.contains('waypoints'))
+      subjectText = (_currentHierarchy != null && !_locationText.contains('...'))
           ? _locationText
           : 'Ready to Explore';
     } else {
@@ -1000,27 +788,10 @@ class _HomeScreenState extends State<HomeScreen> {
       subjectText = _currentSubject.isNotEmpty ? _currentSubject : 'Ready to Explore';
     }
 
-    final bool isActive     = _simulationMode ? _simulationRunning : _isNarrating;
-    final bool audioPlaying = isActive &&
+    final bool audioPlaying = _isNarrating &&
         _audioPlayer.playing &&
         _audioPlayer.processingState != ProcessingState.completed &&
         _audioPlayer.processingState != ProcessingState.idle;
-
-    VoidCallback? startAction;
-    if (_simulationMode) {
-      startAction = _routeWaypoints.isNotEmpty ? _startSimulation : null;
-    } else {
-      startAction = _startNarration;
-    }
-    final VoidCallback stopAction;
-    if (_simulationMode) {
-      stopAction = () {
-        _stopSimulation();
-        setState(() => _selectedIndex = 2);
-      };
-    } else {
-      stopAction = _stopNarration;
-    }
 
     return Container(
       color: _cream,
@@ -1118,7 +889,7 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 28),
             child: Row(
               children: [
-                if (isActive) ...[
+                if (_isNarrating) ...[
                   // Tour active: Skip is primary (large), Stop is secondary (small, red)
                   Expanded(
                     flex: 3,
@@ -1144,7 +915,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     height: 56,
                     width: 80,
                     child: ElevatedButton(
-                      onPressed: stopAction,
+                      onPressed: _stopNarration,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.red.shade600,
                         foregroundColor: Colors.white,
@@ -1161,13 +932,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: SizedBox(
                       height: 56,
                       child: ElevatedButton.icon(
-                        onPressed: startAction,
+                        onPressed: _startNarration,
                         icon: const Icon(Icons.play_arrow_rounded, size: 22),
                         label: const Text('Start Tour', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: _green,
                           foregroundColor: Colors.white,
-                          disabledBackgroundColor: Colors.grey.shade300,
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
                           elevation: 3,
                           shadowColor: _green.withValues(alpha: 0.4),
@@ -1298,17 +1068,8 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-
   Widget _buildDisplayMap() {
-    // Determine map center: use stored position, or first simulation waypoint, or default
-    LatLng center;
-    if (_currentLat != null && _currentLng != null) {
-      center = LatLng(_currentLat!, _currentLng!);
-    } else if (_routeWaypoints.isNotEmpty) {
-      final wp = _routeWaypoints[_waypointIndex.clamp(0, _routeWaypoints.length - 1)];
-      center = LatLng(wp['lat']!, wp['lng']!);
-    } else {
-      // No position yet — show placeholder
+    if (_currentLat == null || _currentLng == null) {
       return Container(
         color: const Color(0xFFE0D5BC),
         child: Center(
@@ -1316,6 +1077,8 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       );
     }
+
+    final center = LatLng(_currentLat!, _currentLng!);
 
     return FlutterMap(
       mapController: _displayMapController,
@@ -1357,60 +1120,24 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ─── Simulate page ───────────────────────────────────────────────────────────
+  // ─── Skip narration ───────────────────────────────────────────────────────────
 
-  Widget _buildSimulatePage() {
-    return Container(
-      color: _cream,
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Header
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-              child: Row(
-                children: [
-                  const Icon(Icons.directions_bus_rounded, color: _green, size: 22),
-                  const SizedBox(width: 8),
-                  const Text(
-                    'Tour Guides',
-                    style: TextStyle(color: _green, fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-            ),
-            _buildTopSection(),
-            _buildSimulationModeToggle(),
-            if (_simulationMode) ...[
-              _buildStatusBanner(),
-              _buildSimulationControls(),
-              _buildBottomSection(),
-            ],
-            if (_settings.debugMode)
-              Container(
-                margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.amber.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
-                ),
-                child: Text(
-                  _debugMessage.isEmpty ? 'Debug mode on' : _debugMessage,
-                  style: TextStyle(color: Colors.brown.shade700, fontSize: 11),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            const SizedBox(height: 40),
-          ],
-        ),
-      ),
+  void _skipNarration() {
+    _musicDeepDuckTimer?.cancel();
+    _audioPlayer.stop();
+    _restoreMusic(); // explicit skip — restore music immediately
+  }
+
+  // ─── Page 1: Tour Guides ─────────────────────────────────────────────────────
+
+  Widget _buildTourGuidesPage() {
+    return TourGuidesScreen(
+      guides: _tourGuides,
+      onRefresh: _fetchTourGuides,
     );
   }
 
-  // ─── Page 2: Settings ───────────────────────────────────────────────────────
+  // ─── Page 2: Settings ────────────────────────────────────────────────────────
 
   Widget _buildSettingsPage() {
     return SettingsContent(
@@ -1423,214 +1150,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-
-  Widget _buildTopSection() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-      child: Text(
-        _locationText,
-        style: const TextStyle(
-          color: Colors.black,
-          fontSize: 28,
-          fontWeight: FontWeight.bold,
-          height: 1.1,
-        ),
-      ),
-    );
-  }
-
-
-  // ─── Simulation controls ─────────────────────────────────────────────────────
-
-  Widget _buildSimulationControls() {
-    final hasRoute = _routeWaypoints.isNotEmpty;
-    final canFetch = _startAddressCtrl.text.trim().isNotEmpty &&
-        _endAddressCtrl.text.trim().isNotEmpty &&
-        !_isLoadingRoute;
-
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _buildAddressField(_startAddressCtrl, 'Start address'),
-          const SizedBox(height: 8),
-          _buildAddressField(_endAddressCtrl, 'End address'),
-          const SizedBox(height: 10),
-          ElevatedButton(
-            onPressed: canFetch ? _fetchRoute : null,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _green,
-              foregroundColor: Colors.white,
-              disabledBackgroundColor: Colors.grey.shade200,
-              disabledForegroundColor: Colors.grey.shade400,
-              padding: const EdgeInsets.symmetric(vertical: 12),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              elevation: 0,
-            ),
-            child: Text(
-              _isLoadingRoute ? 'Loading route...' : 'Get Route',
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
-            ),
-          ),
-          if (hasRoute) ...[
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Text(
-                  'Step $_waypointIndex of ${_routeWaypoints.length}',
-                  style: TextStyle(color: Colors.black54, fontSize: 11),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: LinearProgressIndicator(
-                      value: _routeWaypoints.isEmpty
-                          ? 0
-                          : _waypointIndex / _routeWaypoints.length,
-                      backgroundColor: Colors.black.withValues(alpha: 0.08),
-                      color: _green,
-                      minHeight: 6,
-                    ),
-                  ),
-                ),
-                if (_simulationRunning) ...[
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: 28,
-                    height: 28,
-                    child: IconButton(
-                      padding: EdgeInsets.zero,
-                      icon: Icon(Icons.skip_next, size: 20, color: _green),
-                      tooltip: 'Advance one step',
-                      onPressed: _stepSimulation,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 10),
-            _buildSimulationMap(),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSimulationMap() {
-    final waypoints = _routeWaypoints;
-    if (waypoints.isEmpty) return const SizedBox.shrink();
-
-    final polylinePoints = waypoints.map((w) => LatLng(w['lat']!, w['lng']!)).toList();
-    final currentIdx = (_waypointIndex - 1).clamp(0, waypoints.length - 1);
-    final currentPos = polylinePoints[currentIdx];
-
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: SizedBox(
-        height: 200,
-        child: FlutterMap(
-          mapController: _mapController,
-          options: MapOptions(
-            initialCenter: polylinePoints[waypoints.length ~/ 2],
-            initialZoom: 7,
-          ),
-          children: [
-            TileLayer(
-              urlTemplate: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
-              subdomains: const ['a', 'b', 'c', 'd'],
-              userAgentPackageName: 'com.example.tour_guide',
-            ),
-            PolylineLayer(
-              polylines: [
-                Polyline(
-                  points: polylinePoints,
-                  strokeWidth: 4,
-                  color: Colors.black.withValues(alpha: 0.15),
-                ),
-                if (currentIdx > 0)
-                  Polyline(
-                    points: polylinePoints.sublist(0, currentIdx + 1),
-                    strokeWidth: 4,
-                    color: _green.withValues(alpha: 0.85),
-                  ),
-              ],
-            ),
-            MarkerLayer(
-              markers: [
-                Marker(
-                  point: polylinePoints.first,
-                  width: 14, height: 14,
-                  child: Container(
-                    decoration: const BoxDecoration(color: _green, shape: BoxShape.circle),
-                  ),
-                ),
-                Marker(
-                  point: polylinePoints.last,
-                  width: 14, height: 14,
-                  child: Container(
-                    decoration: BoxDecoration(color: _amber, shape: BoxShape.circle),
-                  ),
-                ),
-                Marker(
-                  point: currentPos,
-                  width: 18, height: 18,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: _green, width: 3),
-                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 4)],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAddressField(TextEditingController ctrl, String hint) {
-    return TextField(
-      controller: ctrl,
-      style: const TextStyle(color: Colors.black87, fontSize: 14),
-      decoration: InputDecoration(
-        hintText: hint,
-        hintStyle: const TextStyle(color: Colors.black38),
-        isDense: true,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        filled: true,
-        fillColor: const Color(0xFFF0EBE0),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide.none,
-        ),
-      ),
-      onChanged: (_) => setState(() {}),
-    );
-  }
-
-  // ─── Tour Guides page ─────────────────────────────────────────────────────────
-
-  Widget _buildTourGuidesPage() {
-    return TourGuidesScreen(
-      guides: _tourGuides,
-      onRefresh: _fetchTourGuides,
-    );
-  }
-
-  // ─── Admin page ───────────────────────────────────────────────────────────────
+  // ─── Page 3: Admin ────────────────────────────────────────────────────────────
 
   Widget _buildAdminPage() {
     return AdminContent(
@@ -1642,136 +1162,6 @@ class _HomeScreenState extends State<HomeScreen> {
       currentHierarchy: _currentHierarchy,
       previousHierarchy: _previousHierarchy,
       changedLevels: _changedLevels,
-    );
-  }
-
-  // ─── Simulation mode toggle ───────────────────────────────────────────────────
-
-  Widget _buildSimulationModeToggle() {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 2)),
-        ],
-      ),
-      child: SwitchListTile(
-        value: _simulationMode,
-        onChanged: _switchMode,
-        title: const Text('Simulation Mode', style: TextStyle(fontWeight: FontWeight.w600)),
-        subtitle: Text(
-          _simulationMode
-              ? 'GPS paused — using simulated route'
-              : 'GPS active — real location tracking',
-        ),
-        activeThumbColor: _green,
-        contentPadding: EdgeInsets.zero,
-      ),
-    );
-  }
-
-  // ─── Status banner (Simulate page) ───────────────────────────────────────────
-
-  Widget _buildStatusBanner() {
-    if (_simulationRunning) {
-      return _buildBannerWidget('Simulation Active', Icons.science_rounded, Colors.amber);
-    }
-    return const SizedBox.shrink();
-  }
-
-  Widget _buildBannerWidget(String text, IconData icon, Color color) {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: color, size: 16),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              text,
-              style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w500),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ─── Bottom buttons ───────────────────────────────────────────────────────────
-
-  void _skipNarration() async {
-    _nextNarrationAllowedAt = null; // explicit skip bypasses cooldown
-    _musicDeepDuckTimer?.cancel();
-    _audioPlayer.stop();
-    final found = await _dequeueAndPlay();
-    if (!found) _restoreMusic();
-  }
-
-  Widget _buildBottomSection() {
-    final bool audioPlaying = _isNarrating &&
-        _audioPlayer.playing &&
-        _audioPlayer.processingState != ProcessingState.completed &&
-        _audioPlayer.processingState != ProcessingState.idle;
-    final bool isActive = _simulationRunning;
-    final VoidCallback? startAction =
-        _routeWaypoints.isNotEmpty ? _startSimulation : null;
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-      child: Row(
-        children: [
-          Expanded(
-            flex: 3,
-            child: SizedBox(
-              height: 52,
-              child: ElevatedButton.icon(
-                onPressed: isActive ? _stopSimulation : startAction,
-                icon: Icon(isActive ? Icons.stop_rounded : Icons.play_arrow_rounded, size: 20),
-                label: Text(
-                  isActive ? 'Stop Simulation' : 'Start Simulation',
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _green,
-                  foregroundColor: Colors.white,
-                  disabledBackgroundColor: Colors.grey.shade200,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
-                  elevation: 0,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 2,
-            child: SizedBox(
-              height: 52,
-              child: ElevatedButton.icon(
-                onPressed: audioPlaying ? _skipNarration : null,
-                icon: const Icon(Icons.skip_next_rounded, size: 20),
-                label: const Text('Skip', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _amber,
-                  foregroundColor: Colors.white,
-                  disabledBackgroundColor: Colors.grey.shade200,
-                  disabledForegroundColor: Colors.grey.shade400,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
-                  elevation: 0,
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }
