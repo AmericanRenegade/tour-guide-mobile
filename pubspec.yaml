@@ -1,7 +1,7 @@
 name: tour_guide
 description: "A new Flutter project."
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.1.0+2
 
 environment:
   sdk: ^3.11.0
@@ -16,20 +16,19 @@ dependencies:
   shared_preferences: ^2.3.0
   uuid: ^4.5.0
   path_provider: ^2.1.5
-  flutter_native_splash: ^2.4.0
-  wakelock_plus: ^1.1.4
   flutter_map: ^7.0.2
   latlong2: ^0.9.1
   firebase_core: ^3.6.0
   firebase_auth: ^5.3.1
   google_sign_in: ^6.2.1
-  flutter_facebook_auth: ^7.0.1
+  package_info_plus: ^8.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.2
+  flutter_native_splash: ^2.4.0
 
 flutter_launcher_icons:
   android: true

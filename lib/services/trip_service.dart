@@ -16,6 +16,7 @@ class PendingNarration {
   final String audioBase64;
   final String narrationText;
   final String? guidePhotoUrl;
+  final String? locationId;
 
   const PendingNarration({
     required this.locationName,
@@ -23,6 +24,7 @@ class PendingNarration {
     required this.audioBase64,
     this.narrationText = '',
     this.guidePhotoUrl,
+    this.locationId,
   });
 }
 
@@ -158,6 +160,7 @@ class TripService extends ChangeNotifier {
               guidePhotoUrl: guideId != null
                   ? '$_backendBase/tour-guides/$guideId/photo'
                   : null,
+              locationId: narration['location_id'] as String?,
             );
             notifyListeners();
           }

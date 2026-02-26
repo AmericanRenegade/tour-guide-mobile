@@ -5,11 +5,15 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/active_location.dart';
 import '../services/trip_service.dart';
 import '../services/audio_service.dart';
 import '../auth_service.dart';
+import '../models/tour.dart';
 import 'settings_screen.dart';
+import 'tours_screen.dart';
 
 // ── Search result model ─────────────────────────────────────────────────────
 
@@ -63,10 +67,14 @@ class _MapScreenState extends State<MapScreen> {
 
   List<ActiveLocation> _locations = [];
   LatLng? _userPosition;
-  bool _cameraCenteredOnUser = false;
+  bool _followingUser = true;
   StreamSubscription<Position>? _positionSub;
   bool _narrationVisible = false;
   bool _playingNarration = false;
+
+  // Active tour
+  Tour? _activeTour;
+  Set<String> _visitedTourLocations = {};
 
   // Narration text auto-scroll
   final ScrollController _narrationScrollController = ScrollController();
@@ -84,6 +92,9 @@ class _MapScreenState extends State<MapScreen> {
   String _searchState = '';
   String _searchCounty = '';
 
+  // Version
+  String _version = '';
+
   @override
   void initState() {
     super.initState();
@@ -92,6 +103,8 @@ class _MapScreenState extends State<MapScreen> {
     _fetchLocations();
     _startLocationTracking();
     _syncAuth();
+    _loadVersion();
+    _loadActiveTour();
   }
 
   @override
@@ -147,10 +160,9 @@ class _MapScreenState extends State<MapScreen> {
     ).listen((pos) {
       final ll = LatLng(pos.latitude, pos.longitude);
       if (mounted) setState(() => _userPosition = ll);
-      if (!_cameraCenteredOnUser) {
-        _cameraCenteredOnUser = true;
+      if (_followingUser) {
         try {
-          _mapController.move(ll, 15);
+          _mapController.move(ll, _mapController.camera.zoom);
         } catch (_) {}
       }
     });
@@ -172,6 +184,56 @@ class _MapScreenState extends State<MapScreen> {
     } catch (_) {}
   }
 
+  // ── Version ───────────────────────────────────────────────────────────────
+
+  Future<void> _loadVersion() async {
+    final info = await PackageInfo.fromPlatform();
+    if (mounted) setState(() => _version = 'v${info.version}+${info.buildNumber}');
+  }
+
+  // ── Active tour ──────────────────────────────────────────────────────────
+
+  Future<void> _loadActiveTour() async {
+    final prefs = await SharedPreferences.getInstance();
+    final json = prefs.getString('selected_tour_json');
+    if (json != null && mounted) {
+      final tour = Tour.fromJson(jsonDecode(json) as Map<String, dynamic>);
+      final visited = prefs.getStringList('tour_visited_${tour.id}') ?? [];
+      setState(() {
+        _activeTour = tour;
+        _visitedTourLocations = visited.toSet();
+      });
+    } else if (mounted) {
+      setState(() {
+        _activeTour = null;
+        _visitedTourLocations = {};
+      });
+    }
+  }
+
+  void _trackTourProgress(String? locationId) {
+    if (_activeTour == null || locationId == null) return;
+    if (!_activeTour!.locationIds.contains(locationId)) return;
+    if (_visitedTourLocations.contains(locationId)) return;
+    setState(() => _visitedTourLocations.add(locationId));
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setStringList(
+          'tour_visited_${_activeTour!.id}', _visitedTourLocations.toList());
+    });
+  }
+
+  // ── Map events ──────────────────────────────────────────────────────────
+
+  void _onMapEvent(MapEvent event) {
+    // Detect user-initiated drags and stop following
+    if (event.source == MapEventSource.dragEnd ||
+        event.source == MapEventSource.multiFingerEnd) {
+      if (_followingUser) {
+        setState(() => _followingUser = false);
+      }
+    }
+  }
+
   // ── Narration ──────────────────────────────────────────────────────────────
 
   void _onTripChanged() {
@@ -184,6 +246,7 @@ class _MapScreenState extends State<MapScreen> {
     final narration = _tripService.pendingNarration;
     if (narration == null) return;
     _playingNarration = true;
+    _trackTourProgress(narration.locationId);
     if (mounted) setState(() => _narrationVisible = true);
 
     // Start auto-scroll listener
@@ -315,6 +378,7 @@ class _MapScreenState extends State<MapScreen> {
 
   void _centerOnUser() {
     if (_userPosition == null) return;
+    _followingUser = true;
     _mapController.move(_userPosition!, _mapController.camera.zoom);
   }
 
@@ -328,11 +392,13 @@ class _MapScreenState extends State<MapScreen> {
         body: Stack(
           children: [
             _buildMap(),
+            _buildTourProgressCard(),
             _buildNarrationCard(),
             _buildCenterButton(),
             _buildTripControls(),
+            _buildVersionLabel(),
             _buildSearchBar(),
-            if (!_searchActive) _buildSettingsPill(),
+            if (!_searchActive) _buildPills(),
             if (_searchActive) _buildSearchResults(),
           ],
         ),
@@ -343,9 +409,10 @@ class _MapScreenState extends State<MapScreen> {
   Widget _buildMap() {
     return FlutterMap(
       mapController: _mapController,
-      options: const MapOptions(
-        initialCenter: LatLng(38.9072, -77.0369), // DC default
+      options: MapOptions(
+        initialCenter: const LatLng(38.9072, -77.0369), // DC default
         initialZoom: 12,
+        onMapEvent: _onMapEvent,
       ),
       children: [
         TileLayer(
@@ -672,6 +739,25 @@ class _MapScreenState extends State<MapScreen> {
     if (ok == true && mounted) await _tripService.stopTrip();
   }
 
+  // ── Version label ─────────────────────────────────────────────────────────
+
+  Widget _buildVersionLabel() {
+    if (_version.isEmpty) return const SizedBox.shrink();
+    return Positioned(
+      bottom: 100,
+      right: 16,
+      child: IgnorePointer(
+        child: Text(
+          _version,
+          style: TextStyle(
+            fontSize: 10,
+            color: Colors.grey.shade600,
+          ),
+        ),
+      ),
+    );
+  }
+
   // ── Search bar ─────────────────────────────────────────────────────────────
 
   Widget _buildSearchBar() {
@@ -825,34 +911,130 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // ── Settings pill ──────────────────────────────────────────────────────────
+  // ── Pills row (Tours + Settings) ──────────────────────────────────────────
 
-  Widget _buildSettingsPill() {
+  Widget _buildPills() {
     final top = MediaQuery.of(context).padding.top + 62;
     return Positioned(
       top: top,
       left: 16,
-      child: Material(
-        elevation: 2,
+      child: Row(
+        children: [
+          _buildToursPill(),
+          const SizedBox(width: 8),
+          _buildSettingsPill(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildToursPill() {
+    final hasTour = _activeTour != null;
+    final pillColor = hasTour ? _teal : Colors.grey;
+    final label = hasTour
+        ? (_activeTour!.name.length > 16
+            ? '${_activeTour!.name.substring(0, 16)}...'
+            : _activeTour!.name)
+        : 'Tours';
+    return Material(
+      elevation: 2,
+      borderRadius: BorderRadius.circular(16),
+      color: Colors.white,
+      child: InkWell(
         borderRadius: BorderRadius.circular(16),
-        color: Colors.white,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(16),
-          onTap: () => Navigator.push(
+        onTap: () async {
+          await Navigator.push(
             context,
-            MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            MaterialPageRoute(builder: (_) => const ToursScreen()),
+          );
+          _loadActiveTour();
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.map_outlined, size: 16, color: pillColor),
+              const SizedBox(width: 4),
+              Text(label,
+                  style: TextStyle(fontSize: 12, color: pillColor)),
+            ],
           ),
-          child: const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.settings, size: 16, color: Colors.grey),
-                SizedBox(width: 4),
-                Text('Settings',
-                    style: TextStyle(fontSize: 12, color: Colors.grey)),
-              ],
-            ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSettingsPill() {
+    return Material(
+      elevation: 2,
+      borderRadius: BorderRadius.circular(16),
+      color: Colors.white,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const SettingsScreen()),
+        ),
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.settings, size: 16, color: Colors.grey),
+              SizedBox(width: 4),
+              Text('Settings',
+                  style: TextStyle(fontSize: 12, color: Colors.grey)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Tour progress card ──────────────────────────────────────────────────────
+
+  Widget _buildTourProgressCard() {
+    if (_activeTour == null || !_narrationVisible) {
+      return const SizedBox.shrink();
+    }
+    final narration = _tripService.pendingNarration;
+    // Only show if the current narration is for a tour location
+    if (narration?.locationId == null ||
+        !_activeTour!.locationIds.contains(narration!.locationId)) {
+      return const SizedBox.shrink();
+    }
+    final visited = _visitedTourLocations.length;
+    final total = _activeTour!.locationCount;
+    return AnimatedPositioned(
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeOutCubic,
+      bottom: _narrationVisible ? 290 : -80,
+      left: 16,
+      right: 16,
+      child: Card(
+        elevation: 8,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              const Icon(Icons.map_outlined, color: _teal, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  _activeTour!.name,
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, fontSize: 14),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Text(
+                '$visited of $total',
+                style: const TextStyle(
+                    color: _teal, fontWeight: FontWeight.w600, fontSize: 14),
+              ),
+            ],
           ),
         ),
       ),
