@@ -128,19 +128,41 @@ class _TourExplorerScreenState extends State<TourExplorerScreen> {
               child: ListView(
                 padding: const EdgeInsets.only(bottom: 32),
                 children: [
-                  // ── Hero photo ──
-                  _buildHeroPhoto(),
+                  // ── Title row with thumbnail ──
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildThumbnail(_tour.photoUrl, Icons.map),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                _tour.name,
+                                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                              ),
+                              if (_tour.description != null && _tour.description!.isNotEmpty) ...[
+                                const SizedBox(height: 4),
+                                Text(_tour.description!,
+                                    style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+                                    maxLines: 3,
+                                    overflow: TextOverflow.ellipsis),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                   // ── Progress + enrollment ──
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        if (_tour.description != null && _tour.description!.isNotEmpty) ...[
-                          Text(_tour.description!,
-                              style: TextStyle(fontSize: 14, color: Colors.grey.shade700)),
-                          const SizedBox(height: 12),
-                        ],
                         // Progress bar
                         ClipRRect(
                           borderRadius: BorderRadius.circular(4),
@@ -202,31 +224,55 @@ class _TourExplorerScreenState extends State<TourExplorerScreen> {
     );
   }
 
-  Widget _buildHeroPhoto() {
-    if (_tour.photoUrl != null) {
-      return Image.network(
-        _tour.photoUrl!,
-        height: 180,
-        width: double.infinity,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => _heroPlaceholder(),
+  Widget _buildThumbnail(String? photoUrl, IconData fallbackIcon) {
+    const double size = 80;
+    Widget content;
+    if (photoUrl != null) {
+      content = ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Image.network(
+          photoUrl,
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _thumbnailPlaceholder(size, fallbackIcon),
+        ),
       );
+    } else {
+      content = _thumbnailPlaceholder(size, fallbackIcon);
     }
-    return _heroPlaceholder();
+    return GestureDetector(
+      onTap: photoUrl != null ? () => _showEnlargedPhoto(photoUrl) : null,
+      child: content,
+    );
   }
 
-  Widget _heroPlaceholder() {
+  Widget _thumbnailPlaceholder(double size, IconData icon) {
     return Container(
-      height: 180,
-      width: double.infinity,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [_teal.withValues(alpha: 0.2), _teal.withValues(alpha: 0.05)],
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
+        color: _teal.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Icon(icon, size: 36, color: _teal),
+    );
+  }
+
+  void _showEnlargedPhoto(String url) {
+    showDialog(
+      context: context,
+      builder: (_) => GestureDetector(
+        onTap: () => Navigator.pop(context),
+        child: Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(24),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.network(url, fit: BoxFit.contain),
+          ),
         ),
       ),
-      child: const Icon(Icons.map, size: 64, color: _teal),
     );
   }
 

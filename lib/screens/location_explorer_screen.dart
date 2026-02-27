@@ -137,28 +137,35 @@ class _LocationExplorerScreenState extends State<LocationExplorerScreen> {
                   child: ListView(
                     padding: const EdgeInsets.only(bottom: 32),
                     children: [
-                      // ── Photo ──
-                      _buildPhoto(),
-                      // ── Info ──
+                      // ── Title row with thumbnail ──
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                        child: Column(
+                        child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              _location!.name,
-                              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                            ),
-                            if (_location!.county != null || _location!.stateCode != null) ...[
-                              const SizedBox(height: 4),
-                              Text(
-                                [
-                                  if (_location!.county != null) _location!.county!,
-                                  if (_location!.stateCode != null) _location!.stateCode!,
-                                ].join(' · '),
-                                style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+                            _buildThumbnail(_location!.photoUrl),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _location!.name,
+                                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                                  ),
+                                  if (_location!.county != null || _location!.stateCode != null) ...[
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      [
+                                        if (_location!.county != null) _location!.county!,
+                                        if (_location!.stateCode != null) _location!.stateCode!,
+                                      ].join(' · '),
+                                      style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+                                    ),
+                                  ],
+                                ],
                               ),
-                            ],
+                            ),
                           ],
                         ),
                       ),
@@ -245,31 +252,55 @@ class _LocationExplorerScreenState extends State<LocationExplorerScreen> {
     );
   }
 
-  Widget _buildPhoto() {
-    if (_location?.photoUrl != null) {
-      return Image.network(
-        _location!.photoUrl!,
-        height: 200,
-        width: double.infinity,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => _photoPlaceholder(),
+  Widget _buildThumbnail(String? photoUrl) {
+    const double size = 80;
+    Widget content;
+    if (photoUrl != null) {
+      content = ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Image.network(
+          photoUrl,
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _thumbnailPlaceholder(size),
+        ),
       );
+    } else {
+      content = _thumbnailPlaceholder(size);
     }
-    return _photoPlaceholder();
+    return GestureDetector(
+      onTap: photoUrl != null ? () => _showEnlargedPhoto(photoUrl) : null,
+      child: content,
+    );
   }
 
-  Widget _photoPlaceholder() {
+  Widget _thumbnailPlaceholder(double size) {
     return Container(
-      height: 200,
-      width: double.infinity,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [Colors.grey.shade200, Colors.grey.shade100],
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
+        color: Colors.grey.shade200,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Icon(Icons.place, size: 36, color: Colors.grey.shade400),
+    );
+  }
+
+  void _showEnlargedPhoto(String url) {
+    showDialog(
+      context: context,
+      builder: (_) => GestureDetector(
+        onTap: () => Navigator.pop(context),
+        child: Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(24),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.network(url, fit: BoxFit.contain),
+          ),
         ),
       ),
-      child: Icon(Icons.place, size: 64, color: Colors.grey.shade400),
     );
   }
 
