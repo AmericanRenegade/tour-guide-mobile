@@ -41,6 +41,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             .map((g) => g as Map<String, dynamic>)
             .toList();
         if (mounted) setState(() => _guides = guides);
+
+        // Auto-select first guide if no preference saved
+        if (_preferredGuide.isEmpty && guides.isNotEmpty) {
+          final firstName = guides.first['name'] as String? ?? '';
+          if (firstName.isNotEmpty) {
+            _setPreferredGuide(firstName);
+          }
+        }
       }
     } catch (e) {
       debugPrint('Settings fetchGuides error: $e');
