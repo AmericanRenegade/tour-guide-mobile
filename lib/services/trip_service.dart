@@ -20,6 +20,7 @@ class PendingNarration {
   final String? locationId;
   final String topic;
   final String? tourId;
+  final String? storyTitle;
 
   const PendingNarration({
     required this.narrationId,
@@ -31,6 +32,7 @@ class PendingNarration {
     this.locationId,
     this.topic = 'location',
     this.tourId,
+    this.storyTitle,
   });
 
   bool get isTourProgress => topic == 'tour_progress';
@@ -233,6 +235,7 @@ class TripService extends ChangeNotifier {
           locationId: data['location_id'] as String?,
           topic: data['topic'] as String? ?? 'location',
           tourId: data['tour_id'] as String?,
+          storyTitle: data['story_title'] as String?,
         );
 
         _narrationQueue.add(narration);

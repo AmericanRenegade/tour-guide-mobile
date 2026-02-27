@@ -73,6 +73,8 @@ class _MapScreenState extends State<MapScreen> {
   bool _playingNarration = false;
   bool _narrationPaused = false;
   bool _skippingNarration = false;
+  bool _narrationMuted = false;
+  double _narrationSlideX = 0; // 0 = visible, 1 = slid off right
 
   // Active tour
   Tour? _activeTour;
@@ -277,9 +279,18 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _skipNarration() {
-    _skippingNarration = true;
-    _audioService.stop();
-    setState(() => _narrationPaused = false);
+    // Slide card off to the right, then stop audio
+    setState(() => _narrationSlideX = 1);
+    Future.delayed(const Duration(milliseconds: 300), () {
+      _skippingNarration = true;
+      _audioService.stop();
+      if (mounted) {
+        setState(() {
+          _narrationPaused = false;
+          _narrationSlideX = 0; // reset for next card
+        });
+      }
+    });
   }
 
   void _toggleNarrationPause() {
@@ -289,6 +300,11 @@ class _MapScreenState extends State<MapScreen> {
       _audioService.pause();
     }
     setState(() => _narrationPaused = !_narrationPaused);
+  }
+
+  void _toggleNarrationMute() {
+    _audioService.toggleMute();
+    setState(() => _narrationMuted = _audioService.isMuted);
   }
 
   void _onAudioPositionChanged(Duration position) {
@@ -525,140 +541,178 @@ class _MapScreenState extends State<MapScreen> {
       bottom: _narrationVisible ? 120 : -320,
       left: 16,
       right: 16,
-      child: Card(
-        elevation: 8,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Top row: guide photo + location name + narrator
-              Row(
+      child: AnimatedSlide(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInCubic,
+        offset: Offset(_narrationSlideX * 1.5, 0),
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 250),
+          opacity: _narrationSlideX > 0 ? 0.0 : 1.0,
+          child: Card(
+            elevation: 8,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Guide photo or fallback icon
-                  _buildGuideAvatar(narration),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          narration?.locationName ?? '',
-                          style: const TextStyle(
-                              fontWeight: FontWeight.bold, fontSize: 16),
+                  // Top row: guide photo + location name + narrator
+                  Row(
+                    children: [
+                      _buildGuideAvatar(narration),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              (narration?.storyTitle ?? '').isNotEmpty
+                                  ? narration!.storyTitle!
+                                  : narration?.locationName ?? '',
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 16),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            if ((narration?.locationName ?? '').isNotEmpty)
+                              Text(
+                                narration!.locationName,
+                                style: const TextStyle(
+                                    color: Colors.grey, fontSize: 12),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            if ((narration?.narrator ?? '').isNotEmpty)
+                              Text(
+                                narration!.narrator,
+                                style: const TextStyle(
+                                    color: Colors.grey, fontSize: 12),
+                              ),
+                          ],
                         ),
-                        if ((narration?.narrator ?? '').isNotEmpty)
-                          Text(
-                            narration!.narrator,
-                            style: const TextStyle(
-                                color: Colors.grey, fontSize: 13),
+                      ),
+                      if (_tripService.totalNarrationsInBatch > 1)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: _teal.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(12),
                           ),
-                      ],
-                    ),
+                          child: Text(
+                            '${_tripService.currentPlayingIndex} of ${_tripService.totalNarrationsInBatch}',
+                            style: const TextStyle(
+                              color: _teal,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
-                  // Queue badge ("2 of 5")
-                  if (_tripService.totalNarrationsInBatch > 1)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: _teal.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(
-                        '${_tripService.currentPlayingIndex} of ${_tripService.totalNarrationsInBatch}',
-                        style: const TextStyle(
-                          color: _teal,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-              // Narration text (scrolling)
-              if ((narration?.narrationText ?? '').isNotEmpty) ...[
-                const SizedBox(height: 10),
-                const Divider(height: 1),
-                const SizedBox(height: 8),
-                SizedBox(
-                  height: 77,
-                  child: ShaderMask(
-                    shaderCallback: (bounds) => const LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Colors.white, Colors.white, Colors.transparent],
-                      stops: [0.0, 0.7, 1.0],
-                    ).createShader(bounds),
-                    blendMode: BlendMode.dstIn,
-                    child: SingleChildScrollView(
-                      controller: _narrationScrollController,
-                      physics: const ClampingScrollPhysics(),
-                      child: Text(
-                        narration!.narrationText,
-                        style: const TextStyle(
-                          fontSize: 13,
-                          height: 1.4,
-                          color: Color(0xFF444444),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-              // Controls row: Skip, Pause/Play, Feedback
-              if (narration != null && !narration.isTourProgress) ...[
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    // Skip button
+                  // Narration text (scrolling)
+                  if ((narration?.narrationText ?? '').isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    const Divider(height: 1),
+                    const SizedBox(height: 8),
                     SizedBox(
-                      height: 32,
-                      child: TextButton.icon(
-                        onPressed: _skipNarration,
-                        icon: const Icon(Icons.skip_next, size: 18),
-                        label: const Text('Skip', style: TextStyle(fontSize: 13)),
-                        style: TextButton.styleFrom(
-                          foregroundColor: _teal,
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                      height: 77,
+                      child: ShaderMask(
+                        shaderCallback: (bounds) => const LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [Colors.white, Colors.white, Colors.transparent],
+                          stops: [0.0, 0.7, 1.0],
+                        ).createShader(bounds),
+                        blendMode: BlendMode.dstIn,
+                        child: SingleChildScrollView(
+                          controller: _narrationScrollController,
+                          physics: const ClampingScrollPhysics(),
+                          child: Text(
+                            narration!.narrationText,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              height: 1.4,
+                              color: Color(0xFF444444),
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    // Pause/Play button
-                    SizedBox(
-                      width: 32,
-                      height: 32,
-                      child: IconButton(
-                        padding: EdgeInsets.zero,
-                        icon: Icon(
-                          _narrationPaused ? Icons.play_circle : Icons.pause_circle,
-                          color: Colors.grey.shade500,
-                          size: 24,
-                        ),
-                        onPressed: _toggleNarrationPause,
-                      ),
-                    ),
-                    const Spacer(),
-                    // Feedback link (stubbed)
-                    SizedBox(
-                      height: 32,
-                      child: TextButton(
-                        onPressed: () {
-                          // TODO: feedback mechanism
-                        },
-                        style: TextButton.styleFrom(
-                          foregroundColor: Colors.grey.shade400,
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                        ),
-                        child: const Text('Feedback', style: TextStyle(fontSize: 12)),
                       ),
                     ),
                   ],
-                ),
-              ],
-            ],
+                  // Controls row: Skip, Pause/Play, Mute, Feedback
+                  if (narration != null && !narration.isTourProgress) ...[
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        // Skip button — yellow, prominent
+                        SizedBox(
+                          height: 38,
+                          child: ElevatedButton.icon(
+                            onPressed: _skipNarration,
+                            icon: const Icon(Icons.skip_next, size: 20),
+                            label: const Text('Skip', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFFBBF24), // amber-400
+                              foregroundColor: Colors.black87,
+                              elevation: 0,
+                              padding: const EdgeInsets.symmetric(horizontal: 16),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(19)),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        // Pause/Play button — larger
+                        SizedBox(
+                          width: 42,
+                          height: 42,
+                          child: IconButton(
+                            padding: EdgeInsets.zero,
+                            icon: Icon(
+                              _narrationPaused ? Icons.play_circle_filled : Icons.pause_circle_filled,
+                              color: _teal,
+                              size: 38,
+                            ),
+                            onPressed: _toggleNarrationPause,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        // Mute button
+                        SizedBox(
+                          width: 42,
+                          height: 42,
+                          child: IconButton(
+                            padding: EdgeInsets.zero,
+                            icon: Icon(
+                              _narrationMuted ? Icons.volume_off : Icons.volume_up,
+                              color: Colors.grey.shade500,
+                              size: 28,
+                            ),
+                            onPressed: _toggleNarrationMute,
+                          ),
+                        ),
+                        const Spacer(),
+                        // Feedback — blue hyperlink style
+                        GestureDetector(
+                          onTap: () {
+                            // TODO: feedback mechanism
+                          },
+                          child: const Text(
+                            'Feedback',
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFF2563EB), // blue-600
+                              decoration: TextDecoration.underline,
+                              decorationColor: Color(0xFF2563EB),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -668,21 +722,21 @@ class _MapScreenState extends State<MapScreen> {
   Widget _buildGuideAvatar(PendingNarration? narration) {
     if (narration?.isTourProgress == true) {
       return Container(
-        width: 48,
-        height: 48,
+        width: 60,
+        height: 60,
         decoration: const BoxDecoration(
           shape: BoxShape.circle,
           color: Color(0xFFFFF8E1),
         ),
-        child: const Icon(Icons.emoji_events, color: Color(0xFFF9A825), size: 26),
+        child: const Icon(Icons.emoji_events, color: Color(0xFFF9A825), size: 32),
       );
     }
     if (narration?.guidePhotoUrl != null) {
       return ClipOval(
         child: Image.network(
           narration!.guidePhotoUrl!,
-          width: 48,
-          height: 48,
+          width: 60,
+          height: 60,
           fit: BoxFit.cover,
           errorBuilder: (_, __, ___) => _fallbackAvatar(),
         ),
@@ -693,13 +747,13 @@ class _MapScreenState extends State<MapScreen> {
 
   Widget _fallbackAvatar() {
     return Container(
-      width: 48,
-      height: 48,
+      width: 60,
+      height: 60,
       decoration: const BoxDecoration(
         shape: BoxShape.circle,
         color: Color(0xFFe0f2f1),
       ),
-      child: const Icon(Icons.volume_up, color: _teal, size: 24),
+      child: const Icon(Icons.volume_up, color: _teal, size: 30),
     );
   }
 

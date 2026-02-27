@@ -40,5 +40,13 @@ class AudioService {
 
   Future<void> stop() => _player.stop();
 
+  bool _muted = false;
+  bool get isMuted => _muted;
+
+  Future<void> toggleMute() async {
+    _muted = !_muted;
+    await _player.setVolume(_muted ? 0.0 : 1.0);
+  }
+
   void dispose() => _player.dispose();
 }
