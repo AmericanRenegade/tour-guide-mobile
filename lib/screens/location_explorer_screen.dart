@@ -383,6 +383,45 @@ class _LocationExplorerScreenState extends State<LocationExplorerScreen> {
     );
   }
 
+  Widget _buildGuideCircle(StorySummary story) {
+    const double size = 36;
+    final guidePhotoUrl = story.guideId != null
+        ? '$_backendBase/tour-guides/${story.guideId}/photo'
+        : null;
+    if (guidePhotoUrl != null) {
+      return ClipOval(
+        child: Image.network(
+          guidePhotoUrl,
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _guideCircleFallback(story),
+        ),
+      );
+    }
+    return _guideCircleFallback(story);
+  }
+
+  Widget _guideCircleFallback(StorySummary story) {
+    final guide = story.guideName ?? story.narrator;
+    return Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        color: guide != null ? _teal.withValues(alpha: 0.15) : Colors.grey.shade200,
+        shape: BoxShape.circle,
+      ),
+      child: Center(
+        child: guide != null
+            ? Text(
+                guide[0].toUpperCase(),
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: _teal),
+              )
+            : Icon(Icons.mic, size: 18, color: Colors.grey.shade400),
+      ),
+    );
+  }
+
   Widget _buildStoryTile(StorySummary story) {
     final duration = story.audioDurationS != null
         ? '${(story.audioDurationS! / 60).floor()}:${(story.audioDurationS! % 60).round().toString().padLeft(2, '0')}'
@@ -408,27 +447,8 @@ class _LocationExplorerScreenState extends State<LocationExplorerScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           child: Row(
             children: [
-              // Guide initial circle
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: guide != null ? _teal.withValues(alpha: 0.15) : Colors.grey.shade200,
-                  shape: BoxShape.circle,
-                ),
-                child: Center(
-                  child: guide != null
-                      ? Text(
-                          guide[0].toUpperCase(),
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: _teal,
-                          ),
-                        )
-                      : Icon(Icons.mic, size: 18, color: Colors.grey.shade400),
-                ),
-              ),
+              // Guide photo
+              _buildGuideCircle(story),
               const SizedBox(width: 10),
               // Title + subtitle
               Expanded(

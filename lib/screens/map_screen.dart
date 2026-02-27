@@ -71,6 +71,8 @@ class _MapScreenState extends State<MapScreen> {
   StreamSubscription<Position>? _positionSub;
   bool _narrationVisible = false;
   bool _playingNarration = false;
+  bool _narrationPaused = false;
+  bool _skippingNarration = false;
 
   // Active tour
   Tour? _activeTour;
@@ -229,6 +231,8 @@ class _MapScreenState extends State<MapScreen> {
     final narration = _tripService.pendingNarration;
     if (narration == null) return;
     _playingNarration = true;
+    _skippingNarration = false;
+    _narrationPaused = false;
     if (mounted) setState(() => _narrationVisible = true);
 
     if (narration.isTourProgress) {
@@ -248,15 +252,19 @@ class _MapScreenState extends State<MapScreen> {
 
     // Advance queue (confirms played to backend, removes from local queue)
     _tripService.advanceQueue();
+    final wasSkipped = _skippingNarration;
+    _skippingNarration = false;
 
-    // If more narrations in queue, play next after brief pause
+    // If more narrations in queue, play next
     if (_tripService.pendingNarration != null) {
       // Reset scroll for the next narration
       if (_narrationScrollController.hasClients) {
         _narrationScrollController.jumpTo(0);
       }
       if (mounted) setState(() {}); // refresh card with new narration info
-      await Future.delayed(const Duration(milliseconds: 500));
+      if (!wasSkipped) {
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
       if (mounted && _tripService.pendingNarration != null) {
         _playingNarration = false;
         _playNarration();
@@ -266,6 +274,21 @@ class _MapScreenState extends State<MapScreen> {
 
     if (mounted) setState(() => _narrationVisible = false);
     _playingNarration = false;
+  }
+
+  void _skipNarration() {
+    _skippingNarration = true;
+    _audioService.stop();
+    setState(() => _narrationPaused = false);
+  }
+
+  void _toggleNarrationPause() {
+    if (_narrationPaused) {
+      _audioService.resume();
+    } else {
+      _audioService.pause();
+    }
+    setState(() => _narrationPaused = !_narrationPaused);
   }
 
   void _onAudioPositionChanged(Duration position) {
@@ -499,7 +522,7 @@ class _MapScreenState extends State<MapScreen> {
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 350),
       curve: Curves.easeOutCubic,
-      bottom: _narrationVisible ? 120 : -250,
+      bottom: _narrationVisible ? 120 : -320,
       left: 16,
       right: 16,
       child: Card(
@@ -560,7 +583,7 @@ class _MapScreenState extends State<MapScreen> {
                 const Divider(height: 1),
                 const SizedBox(height: 8),
                 SizedBox(
-                  height: 52,
+                  height: 77,
                   child: ShaderMask(
                     shaderCallback: (bounds) => const LinearGradient(
                       begin: Alignment.topCenter,
@@ -582,6 +605,57 @@ class _MapScreenState extends State<MapScreen> {
                       ),
                     ),
                   ),
+                ),
+              ],
+              // Controls row: Skip, Pause/Play, Feedback
+              if (narration != null && !narration.isTourProgress) ...[
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    // Skip button
+                    SizedBox(
+                      height: 32,
+                      child: TextButton.icon(
+                        onPressed: _skipNarration,
+                        icon: const Icon(Icons.skip_next, size: 18),
+                        label: const Text('Skip', style: TextStyle(fontSize: 13)),
+                        style: TextButton.styleFrom(
+                          foregroundColor: _teal,
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    // Pause/Play button
+                    SizedBox(
+                      width: 32,
+                      height: 32,
+                      child: IconButton(
+                        padding: EdgeInsets.zero,
+                        icon: Icon(
+                          _narrationPaused ? Icons.play_circle : Icons.pause_circle,
+                          color: Colors.grey.shade500,
+                          size: 24,
+                        ),
+                        onPressed: _toggleNarrationPause,
+                      ),
+                    ),
+                    const Spacer(),
+                    // Feedback link (stubbed)
+                    SizedBox(
+                      height: 32,
+                      child: TextButton(
+                        onPressed: () {
+                          // TODO: feedback mechanism
+                        },
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.grey.shade400,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        child: const Text('Feedback', style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ],
