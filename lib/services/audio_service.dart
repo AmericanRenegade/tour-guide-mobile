@@ -34,6 +34,10 @@ class AudioService {
     }
   }
 
+  Future<void> pause() => _player.pause();
+
+  Future<void> resume() => _player.play();
+
   Future<void> stop() => _player.stop();
 
   void dispose() => _player.dispose();

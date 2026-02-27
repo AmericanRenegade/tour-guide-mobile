@@ -44,6 +44,7 @@ class StorySummary {
   final String? bodyText;
   final double? audioDurationS;
   final int guideAudioCount;
+  final String? guideName;
 
   const StorySummary({
     required this.id,
@@ -52,6 +53,7 @@ class StorySummary {
     this.bodyText,
     this.audioDurationS,
     this.guideAudioCount = 0,
+    this.guideName,
   });
 
   factory StorySummary.fromJson(Map<String, dynamic> j) => StorySummary(
@@ -61,5 +63,6 @@ class StorySummary {
         bodyText: j['body_text'] as String?,
         audioDurationS: (j['audio_duration_s'] as num?)?.toDouble(),
         guideAudioCount: (j['guide_audio_count'] as num?)?.toInt() ?? 0,
+        guideName: j['guide_name'] as String?,
       );
 }

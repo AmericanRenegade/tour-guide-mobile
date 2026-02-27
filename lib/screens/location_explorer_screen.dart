@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import '../auth_service.dart';
 import '../models/location_detail.dart';
+import '../services/audio_service.dart';
 
 class LocationExplorerScreen extends StatefulWidget {
   final String locationId;
@@ -27,10 +28,23 @@ class _LocationExplorerScreenState extends State<LocationExplorerScreen> {
   bool _loading = true;
   bool _togglingVisit = false;
 
+  // Audio playback state
+  late final AudioService _audioService;
+  String? _playingStoryId;
+  bool _isPaused = false;
+  String? _loadingStoryId;
+
   @override
   void initState() {
     super.initState();
+    _audioService = AudioService();
     _fetchDetail();
+  }
+
+  @override
+  void dispose() {
+    _audioService.dispose();
+    super.dispose();
   }
 
   Future<void> _fetchDetail() async {
@@ -252,6 +266,71 @@ class _LocationExplorerScreenState extends State<LocationExplorerScreen> {
     );
   }
 
+  Future<void> _playStory(StorySummary story) async {
+    // Stop any current playback
+    if (_playingStoryId != null) await _audioService.stop();
+
+    setState(() {
+      _playingStoryId = story.id;
+      _loadingStoryId = story.id;
+      _isPaused = false;
+    });
+
+    try {
+      final response = await http
+          .get(Uri.parse('$_backendBase/stories/${story.id}/audio'))
+          .timeout(const Duration(seconds: 15));
+      if (!mounted || _playingStoryId != story.id) return;
+
+      if (response.statusCode != 200) {
+        setState(() {
+          _playingStoryId = null;
+          _loadingStoryId = null;
+        });
+        return;
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      setState(() => _loadingStoryId = null);
+
+      await _audioService.playBase64(data['audio_base64'] as String);
+
+      // Playback completed naturally
+      if (mounted && _playingStoryId == story.id) {
+        setState(() {
+          _playingStoryId = null;
+          _isPaused = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('LocationExplorer playStory error: $e');
+      if (mounted && _playingStoryId == story.id) {
+        setState(() {
+          _playingStoryId = null;
+          _loadingStoryId = null;
+        });
+      }
+    }
+  }
+
+  void _pauseStory() {
+    _audioService.pause();
+    setState(() => _isPaused = true);
+  }
+
+  void _resumeStory() {
+    _audioService.resume();
+    setState(() => _isPaused = false);
+  }
+
+  void _stopStory() {
+    _audioService.stop();
+    setState(() {
+      _playingStoryId = null;
+      _isPaused = false;
+    });
+  }
+
   Widget _buildThumbnail(String? photoUrl) {
     const double size = 80;
     Widget content;
@@ -308,6 +387,12 @@ class _LocationExplorerScreenState extends State<LocationExplorerScreen> {
     final duration = story.audioDurationS != null
         ? '${(story.audioDurationS! / 60).floor()}:${(story.audioDurationS! % 60).round().toString().padLeft(2, '0')}'
         : null;
+    final guide = story.guideName ?? story.narrator;
+    final hasAudio = story.guideAudioCount > 0;
+    final isThis = _playingStoryId == story.id;
+    final isLoading = _loadingStoryId == story.id;
+    final isPlaying = isThis && !_isPaused && !isLoading;
+    final isPaused = isThis && _isPaused;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
@@ -315,15 +400,37 @@ class _LocationExplorerScreenState extends State<LocationExplorerScreen> {
         elevation: 0,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(10),
-          side: BorderSide(color: Colors.grey.shade200),
+          side: BorderSide(
+            color: isThis ? _teal.withValues(alpha: 0.4) : Colors.grey.shade200,
+          ),
         ),
         child: Padding(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(Icons.mic, color: _teal, size: 20),
+              // Guide initial circle
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: guide != null ? _teal.withValues(alpha: 0.15) : Colors.grey.shade200,
+                  shape: BoxShape.circle,
+                ),
+                child: Center(
+                  child: guide != null
+                      ? Text(
+                          guide[0].toUpperCase(),
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: _teal,
+                          ),
+                        )
+                      : Icon(Icons.mic, size: 18, color: Colors.grey.shade400),
+                ),
+              ),
               const SizedBox(width: 10),
+              // Title + subtitle
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -332,24 +439,60 @@ class _LocationExplorerScreenState extends State<LocationExplorerScreen> {
                       story.title ?? 'Untitled Story',
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 2),
                     Text(
                       [
-                        if (story.narrator != null) 'Narrator: ${story.narrator}',
+                        if (guide != null) guide,
                         if (duration != null) duration,
                       ].join(' · '),
                       style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
                     ),
-                    if (story.guideAudioCount > 0) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        '${story.guideAudioCount} guide recording${story.guideAudioCount != 1 ? 's' : ''}',
-                        style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
-                      ),
-                    ],
                   ],
                 ),
               ),
+              // Playback controls
+              if (hasAudio) ...[
+                // Play / Pause button
+                if (isLoading)
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                else
+                  SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: IconButton(
+                      padding: EdgeInsets.zero,
+                      icon: Icon(
+                        isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                        color: _teal,
+                        size: 28,
+                      ),
+                      onPressed: () {
+                        if (isPlaying) {
+                          _pauseStory();
+                        } else if (isPaused) {
+                          _resumeStory();
+                        } else {
+                          _playStory(story);
+                        }
+                      },
+                    ),
+                  ),
+                // Stop button (only when active)
+                if (isThis && !isLoading)
+                  SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: IconButton(
+                      padding: EdgeInsets.zero,
+                      icon: Icon(Icons.stop_circle, color: Colors.grey.shade400, size: 28),
+                      onPressed: _stopStory,
+                    ),
+                  ),
+              ],
             ],
           ),
         ),
