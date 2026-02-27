@@ -1,0 +1,69 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+    inputs:
+      distribute:
+        description: 'Distribute to Firebase App Distribution'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  build:
+    name: Build Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Restore gitignored Firebase config files from GitHub Secrets
+      - name: Restore google-services.json
+        run: echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | base64 -d > android/app/google-services.json
+
+      - name: Restore firebase_options.dart
+        run: echo "${{ secrets.FIREBASE_OPTIONS_DART }}" | base64 -d > lib/firebase_options.dart
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tour-guide-release-${{ github.sha }}
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
+
+      # Firebase App Distribution — delivers APK directly to your phone
+      - name: Distribute to Firebase App Distribution
+        continue-on-error: true
+        if: >
+          (github.event_name == 'push' || github.event.inputs.distribute == 'true')
+          && env.HAS_FIREBASE == 'true'
+        env:
+          HAS_FIREBASE: ${{ secrets.FIREBASE_SERVICE_ACCOUNT != '' }}
+        uses: wzieba/Firebase-Distribution-Github-Action@v1
+        with:
+          appId: "1:940376231423:android:1f50b66135f3a7f0c5abca"
+          serviceCredentialsFileContent: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          groups: testers
+          file: build/app/outputs/flutter-apk/app-release.apk
+          releaseNotes: |
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Message: ${{ github.event.head_commit.message }}
