@@ -74,7 +74,6 @@ class _MapScreenState extends State<MapScreen> {
 
   // Active tour
   Tour? _activeTour;
-  Set<String> _visitedTourLocations = {};
 
   // Narration text auto-scroll
   final ScrollController _narrationScrollController = ScrollController();
@@ -200,55 +199,10 @@ class _MapScreenState extends State<MapScreen> {
     final json = prefs.getString('selected_tour_json');
     if (json != null && mounted) {
       final tour = Tour.fromJson(jsonDecode(json) as Map<String, dynamic>);
-      // Load local cache first (fast)
-      final visited = prefs.getStringList('tour_visited_${tour.id}') ?? [];
-      setState(() {
-        _activeTour = tour;
-        _visitedTourLocations = visited.toSet();
-      });
-      // Then fetch server-side visited locations (authoritative)
-      _fetchServerVisitedLocations(tour);
+      setState(() => _activeTour = tour);
     } else if (mounted) {
-      setState(() {
-        _activeTour = null;
-        _visitedTourLocations = {};
-      });
+      setState(() => _activeTour = null);
     }
-  }
-
-  Future<void> _fetchServerVisitedLocations(Tour tour) async {
-    try {
-      final token = await AuthService.getIdToken();
-      if (token == null) return;
-      final locationIdsParam = tour.locationIds.join(',');
-      final response = await http.get(
-        Uri.parse('$_backendBase/user/visited-locations?location_ids=$locationIdsParam'),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 10));
-      if (response.statusCode == 200 && mounted) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        final visited = (data['visited'] as List)
-            .map((v) => (v as Map<String, dynamic>)['location_id'] as String)
-            .toSet();
-        setState(() => _visitedTourLocations = visited);
-        // Persist locally for offline
-        final prefs = await SharedPreferences.getInstance();
-        prefs.setStringList('tour_visited_${tour.id}', visited.toList());
-      }
-    } catch (e) {
-      debugPrint('MapScreen fetchServerVisited error: $e');
-    }
-  }
-
-  void _trackTourProgress(String? locationId) {
-    if (_activeTour == null || locationId == null) return;
-    if (!_activeTour!.locationIds.contains(locationId)) return;
-    if (_visitedTourLocations.contains(locationId)) return;
-    setState(() => _visitedTourLocations.add(locationId));
-    SharedPreferences.getInstance().then((prefs) {
-      prefs.setStringList(
-          'tour_visited_${_activeTour!.id}', _visitedTourLocations.toList());
-    });
   }
 
   // ── Map events ──────────────────────────────────────────────────────────
@@ -275,7 +229,6 @@ class _MapScreenState extends State<MapScreen> {
     final narration = _tripService.pendingNarration;
     if (narration == null) return;
     _playingNarration = true;
-    _trackTourProgress(narration.locationId);
     if (mounted) setState(() => _narrationVisible = true);
 
     if (narration.isTourProgress) {
@@ -444,7 +397,6 @@ class _MapScreenState extends State<MapScreen> {
         body: Stack(
           children: [
             _buildMap(),
-            _buildTourProgressCard(),
             _buildNarrationCard(),
             _buildCenterButton(),
             _buildTripControls(),
@@ -1075,54 +1027,6 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // ── Tour progress card ──────────────────────────────────────────────────────
-
-  Widget _buildTourProgressCard() {
-    if (_activeTour == null || !_narrationVisible) {
-      return const SizedBox.shrink();
-    }
-    final narration = _tripService.pendingNarration;
-    // Only show if the current narration is for a tour location
-    if (narration?.locationId == null ||
-        !_activeTour!.locationIds.contains(narration!.locationId)) {
-      return const SizedBox.shrink();
-    }
-    final visited = _visitedTourLocations.length;
-    final total = _activeTour!.locationCount;
-    return AnimatedPositioned(
-      duration: const Duration(milliseconds: 350),
-      curve: Curves.easeOutCubic,
-      bottom: _narrationVisible ? 290 : -80,
-      left: 16,
-      right: 16,
-      child: Card(
-        elevation: 8,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          child: Row(
-            children: [
-              const Icon(Icons.map_outlined, color: _teal, size: 20),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  _activeTour!.name,
-                  style: const TextStyle(
-                      fontWeight: FontWeight.bold, fontSize: 14),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              Text(
-                '$visited of $total',
-                style: const TextStyle(
-                    color: _teal, fontWeight: FontWeight.w600, fontSize: 14),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 // ── Search options bottom sheet ──────────────────────────────────────────────
