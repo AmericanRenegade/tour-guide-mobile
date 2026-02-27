@@ -263,7 +263,12 @@ class _MapScreenState extends State<MapScreen> {
       if (_narrationScrollController.hasClients) {
         _narrationScrollController.jumpTo(0);
       }
-      if (mounted) setState(() {}); // refresh card with new narration info
+      // Reset slide position so new card appears
+      if (mounted) {
+        setState(() {
+          _narrationSlideX = 0;
+        });
+      }
       if (!wasSkipped) {
         await Future.delayed(const Duration(milliseconds: 500));
       }
@@ -274,22 +279,26 @@ class _MapScreenState extends State<MapScreen> {
       }
     }
 
+    // No more narrations — hide the card, then reset slide position
     if (mounted) setState(() => _narrationVisible = false);
     _playingNarration = false;
+    // Reset slideX after card has animated off-screen
+    Future.delayed(const Duration(milliseconds: 400), () {
+      if (mounted) setState(() => _narrationSlideX = 0);
+    });
   }
 
   void _skipNarration() {
     // Slide card off to the right, then stop audio
-    setState(() => _narrationSlideX = 1);
+    setState(() {
+      _narrationSlideX = 1;
+      _narrationPaused = false;
+    });
     Future.delayed(const Duration(milliseconds: 300), () {
       _skippingNarration = true;
       _audioService.stop();
-      if (mounted) {
-        setState(() {
-          _narrationPaused = false;
-          _narrationSlideX = 0; // reset for next card
-        });
-      }
+      // Don't reset _narrationSlideX here — _playNarration resets it
+      // only when a new narration is ready or after the card is hidden.
     });
   }
 
