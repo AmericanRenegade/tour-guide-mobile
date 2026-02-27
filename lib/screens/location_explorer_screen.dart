@@ -464,6 +464,7 @@ class _LocationExplorerScreenState extends State<LocationExplorerScreen> {
                       [
                         if (guide != null) guide,
                         if (duration != null) duration,
+                        if (story.delayS > 0) 'delay: ${story.delayS ~/ 60}:${(story.delayS % 60).toString().padLeft(2, '0')}',
                       ].join(' · '),
                       style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
                     ),
