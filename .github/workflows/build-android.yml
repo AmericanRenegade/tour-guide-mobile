@@ -30,6 +30,14 @@ jobs:
       - name: Restore firebase_options.dart
         run: echo "${{ secrets.FIREBASE_OPTIONS_DART }}" | base64 -d > lib/firebase_options.dart
 
+      - name: Restore signing keystore
+        run: |
+          if [ -n "$CI_KEYSTORE" ]; then
+            echo "$CI_KEYSTORE" | base64 -d > ${{ github.workspace }}/ci-release.keystore
+          fi
+        env:
+          CI_KEYSTORE: ${{ secrets.CI_KEYSTORE }}
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -41,6 +49,11 @@ jobs:
 
       - name: Build release APK
         run: flutter build apk --release
+        env:
+          CI_KEYSTORE_PATH: ${{ github.workspace }}/ci-release.keystore
+          CI_KEYSTORE_PASSWORD: ${{ secrets.CI_KEYSTORE_PASSWORD }}
+          CI_KEY_ALIAS: ${{ secrets.CI_KEY_ALIAS }}
+          CI_KEY_PASSWORD: ${{ secrets.CI_KEY_PASSWORD }}
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

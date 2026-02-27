@@ -21,21 +21,33 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.tour_guide"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        create("ciRelease") {
+            val ksFile = file(System.getenv("CI_KEYSTORE_PATH") ?: "/dev/null")
+            if (ksFile.exists()) {
+                storeFile = ksFile
+                storePassword = System.getenv("CI_KEYSTORE_PASSWORD") ?: ""
+                keyAlias = System.getenv("CI_KEY_ALIAS") ?: ""
+                keyPassword = System.getenv("CI_KEY_PASSWORD") ?: ""
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            val ciKs = file(System.getenv("CI_KEYSTORE_PATH") ?: "/dev/null")
+            signingConfig = if (ciKs.exists()) {
+                signingConfigs.getByName("ciRelease")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }
