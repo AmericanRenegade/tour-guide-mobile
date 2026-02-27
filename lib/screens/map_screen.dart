@@ -258,8 +258,26 @@ class _MapScreenState extends State<MapScreen> {
 
     _positionStreamSub?.cancel();
     _positionStreamSub = null;
+
+    // Advance queue (confirms played to backend, removes from local queue)
+    _tripService.advanceQueue();
+
+    // If more narrations in queue, play next after brief pause
+    if (_tripService.pendingNarration != null) {
+      // Reset scroll for the next narration
+      if (_narrationScrollController.hasClients) {
+        _narrationScrollController.jumpTo(0);
+      }
+      if (mounted) setState(() {}); // refresh card with new narration info
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (mounted && _tripService.pendingNarration != null) {
+        _playingNarration = false;
+        _playNarration();
+        return;
+      }
+    }
+
     if (mounted) setState(() => _narrationVisible = false);
-    _tripService.clearNarration();
     _playingNarration = false;
   }
 
@@ -531,6 +549,23 @@ class _MapScreenState extends State<MapScreen> {
                       ],
                     ),
                   ),
+                  // Queue badge ("2 of 5")
+                  if (_tripService.totalNarrationsInBatch > 1)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: _teal.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        '${_tripService.currentPlayingIndex} of ${_tripService.totalNarrationsInBatch}',
+                        style: const TextStyle(
+                          color: _teal,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
                 ],
               ),
               // Narration text (scrolling)
