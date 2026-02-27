@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../auth_service.dart';
 import '../models/tour.dart';
+import 'tour_explorer_screen.dart';
 
 class ToursScreen extends StatefulWidget {
   final double? userLat;
@@ -282,6 +283,46 @@ class _ToursScreenState extends State<ToursScreen> {
     );
   }
 
+  // ── Navigate to tour explorer ────────────────────────────────────────────
+
+  void _openTourExplorer(Tour tour) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => TourExplorerScreen(tour: tour)),
+    );
+    _fetchTours(); // re-fetch in case visit status or enrollment changed
+  }
+
+  // ── Tour thumbnail helper ──────────────────────────────────────────────
+
+  Widget _tourThumbnail(Tour tour) {
+    if (tour.photoUrl != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.network(
+          tour.photoUrl!,
+          width: 48,
+          height: 48,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _tourPlaceholder(),
+        ),
+      );
+    }
+    return _tourPlaceholder();
+  }
+
+  Widget _tourPlaceholder() {
+    return Container(
+      width: 48,
+      height: 48,
+      decoration: BoxDecoration(
+        color: _teal.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: const Icon(Icons.map, color: _teal, size: 24),
+    );
+  }
+
   // ── My Tour card (enrolled, with progress) ────────────────────────────────
 
   Widget _buildMyTourCard(Tour tour) {
@@ -299,50 +340,60 @@ class _ToursScreenState extends State<ToursScreen> {
         borderRadius: BorderRadius.circular(10),
         side: BorderSide(color: _teal.withValues(alpha: 0.3)),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.map, color: _teal, size: 20),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(tour.name,
-                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
-                ),
-                SizedBox(
-                  height: 28,
-                  child: TextButton(
-                    style: TextButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 10),
-                      foregroundColor: Colors.red.shade400,
-                      textStyle: const TextStyle(fontSize: 12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => _openTourExplorer(tour),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _tourThumbnail(tour),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(tour.name,
+                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                        ),
+                        SizedBox(
+                          height: 28,
+                          child: TextButton(
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(horizontal: 10),
+                              foregroundColor: Colors.red.shade400,
+                              textStyle: const TextStyle(fontSize: 12),
+                            ),
+                            onPressed: () => _leaveTour(tour),
+                            child: const Text('Leave'),
+                          ),
+                        ),
+                      ],
                     ),
-                    onPressed: () => _leaveTour(tour),
-                    child: const Text('Leave'),
-                  ),
+                    const SizedBox(height: 6),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: progress,
+                        minHeight: 6,
+                        backgroundColor: Colors.grey.shade200,
+                        valueColor: const AlwaysStoppedAnimation(_teal),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${tour.locationsVisited} of ${tour.locationCount} locations · $pct%',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            // Progress bar
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                value: progress,
-                minHeight: 6,
-                backgroundColor: Colors.grey.shade200,
-                valueColor: const AlwaysStoppedAnimation(_teal),
               ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '${tour.locationsVisited} of ${tour.locationCount} locations · $pct%',
-              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -351,6 +402,13 @@ class _ToursScreenState extends State<ToursScreen> {
   // ── Available tour card ───────────────────────────────────────────────────
 
   Widget _buildAvailableTourCard(Tour tour) {
+    final pct = tour.locationCount > 0
+        ? (tour.locationsVisited / tour.locationCount * 100).round()
+        : 0;
+    final progress = tour.locationCount > 0
+        ? tour.locationsVisited / tour.locationCount
+        : 0.0;
+
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       elevation: 0,
@@ -360,34 +418,42 @@ class _ToursScreenState extends State<ToursScreen> {
       ),
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
-        onTap: () => _joinTour(tour),
+        onTap: () => _openTourExplorer(tour),
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(Icons.map_outlined, color: Colors.grey.shade400, size: 20),
-              const SizedBox(width: 8),
+              _tourThumbnail(tour),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(tour.name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-                    const SizedBox(height: 2),
-                    Text(
-                      '${tour.locationCount} locations${tour.stateCodes.isNotEmpty ? ' · ${tour.stateCodes.join(", ")}' : ''}',
-                      style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
-                    ),
+                    const SizedBox(height: 4),
+                    if (tour.locationsVisited > 0) ...[
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: LinearProgressIndicator(
+                          value: progress,
+                          minHeight: 4,
+                          backgroundColor: Colors.grey.shade200,
+                          valueColor: AlwaysStoppedAnimation(Colors.grey.shade400),
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        '${tour.locationsVisited} of ${tour.locationCount} locations · $pct%',
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                      ),
+                    ] else
+                      Text(
+                        '${tour.locationCount} locations${tour.stateCodes.isNotEmpty ? ' · ${tour.stateCodes.join(", ")}' : ''}',
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                      ),
                   ],
                 ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: _teal.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: const Text('Join',
-                    style: TextStyle(color: _teal, fontSize: 12, fontWeight: FontWeight.w600)),
               ),
             ],
           ),
