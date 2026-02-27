@@ -1025,7 +1025,10 @@ class _MapScreenState extends State<MapScreen> {
         onTap: () async {
           await Navigator.push(
             context,
-            MaterialPageRoute(builder: (_) => const ToursScreen()),
+            MaterialPageRoute(builder: (_) => ToursScreen(
+              userLat: _userPosition?.latitude,
+              userLng: _userPosition?.longitude,
+            )),
           );
           _loadActiveTour();
         },

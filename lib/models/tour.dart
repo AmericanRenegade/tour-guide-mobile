@@ -5,7 +5,9 @@ class Tour {
   final String? photoUrl;
   final int locationCount;
   final List<String> locationIds;
+  final List<String> stateCodes;
   final int locationsVisited;
+  final bool enrolled;
   final String? enrolledAt;
 
   const Tour({
@@ -15,7 +17,9 @@ class Tour {
     this.photoUrl,
     required this.locationCount,
     required this.locationIds,
+    this.stateCodes = const [],
     this.locationsVisited = 0,
+    this.enrolled = false,
     this.enrolledAt,
   });
 
@@ -29,7 +33,12 @@ class Tour {
                 ?.map((e) => e as String)
                 .toList() ??
             [],
+        stateCodes: (j['state_codes'] as List?)
+                ?.map((e) => e as String)
+                .toList() ??
+            [],
         locationsVisited: (j['locations_visited'] as num?)?.toInt() ?? 0,
+        enrolled: j['enrolled'] as bool? ?? false,
         enrolledAt: j['enrolled_at'] as String?,
       );
 
@@ -40,7 +49,9 @@ class Tour {
         'photo_url': photoUrl,
         'location_count': locationCount,
         'location_ids': locationIds,
+        'state_codes': stateCodes,
         'locations_visited': locationsVisited,
+        'enrolled': enrolled,
         'enrolled_at': enrolledAt,
       };
 }
