@@ -51,6 +51,7 @@ jobs:
 
       # Firebase App Distribution — delivers APK directly to your phone
       - name: Distribute to Firebase App Distribution
+        continue-on-error: true
         if: >
           (github.event_name == 'push' || github.event.inputs.distribute == 'true')
           && env.HAS_FIREBASE == 'true'
