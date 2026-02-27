@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../auth_service.dart';
 import '../models/tour.dart';
 
 class ToursScreen extends StatefulWidget {
@@ -57,14 +58,54 @@ class _ToursScreenState extends State<ToursScreen> {
     final prefs = await SharedPreferences.getInstance();
     if (tour == null || tour.id == _selectedTourId) {
       // Deselect
+      final oldId = _selectedTourId;
       await prefs.remove('selected_tour_id');
       await prefs.remove('selected_tour_json');
       setState(() => _selectedTourId = null);
+      if (oldId != null) _serverLeaveTour(oldId);
     } else {
-      // Select
+      // Leave previous tour if any
+      final oldId = _selectedTourId;
+      if (oldId != null && oldId != tour.id) _serverLeaveTour(oldId);
+      // Select new tour
       await prefs.setString('selected_tour_id', tour.id);
       await prefs.setString('selected_tour_json', jsonEncode(tour.toJson()));
       setState(() => _selectedTourId = tour.id);
+      _serverJoinTour(tour.id);
+    }
+  }
+
+  /// Fire-and-forget: tell backend user joined a tour.
+  Future<void> _serverJoinTour(String tourId) async {
+    try {
+      final token = await AuthService.getIdToken();
+      if (token == null) return;
+      await http.post(
+        Uri.parse('$_backendBase/user/tours/$tourId/join'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      ).timeout(const Duration(seconds: 10));
+    } catch (e) {
+      debugPrint('ToursScreen joinTour error: $e');
+    }
+  }
+
+  /// Fire-and-forget: tell backend user left a tour.
+  Future<void> _serverLeaveTour(String tourId) async {
+    try {
+      final token = await AuthService.getIdToken();
+      if (token == null) return;
+      await http.post(
+        Uri.parse('$_backendBase/user/tours/$tourId/leave'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      ).timeout(const Duration(seconds: 10));
+    } catch (e) {
+      debugPrint('ToursScreen leaveTour error: $e');
     }
   }
 

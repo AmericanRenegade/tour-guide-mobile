@@ -174,11 +174,13 @@ class _MapScreenState extends State<MapScreen> {
     final token = await AuthService.getIdToken();
     if (token == null) return;
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final deviceId = prefs.getString('device_id') ?? '';
       await http
           .post(
             Uri.parse('$_backendBase/auth/sync'),
             headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'id_token': token}),
+            body: jsonEncode({'device_id': deviceId, 'id_token': token}),
           )
           .timeout(const Duration(seconds: 10));
     } catch (_) {}
@@ -198,16 +200,43 @@ class _MapScreenState extends State<MapScreen> {
     final json = prefs.getString('selected_tour_json');
     if (json != null && mounted) {
       final tour = Tour.fromJson(jsonDecode(json) as Map<String, dynamic>);
+      // Load local cache first (fast)
       final visited = prefs.getStringList('tour_visited_${tour.id}') ?? [];
       setState(() {
         _activeTour = tour;
         _visitedTourLocations = visited.toSet();
       });
+      // Then fetch server-side visited locations (authoritative)
+      _fetchServerVisitedLocations(tour);
     } else if (mounted) {
       setState(() {
         _activeTour = null;
         _visitedTourLocations = {};
       });
+    }
+  }
+
+  Future<void> _fetchServerVisitedLocations(Tour tour) async {
+    try {
+      final token = await AuthService.getIdToken();
+      if (token == null) return;
+      final locationIdsParam = tour.locationIds.join(',');
+      final response = await http.get(
+        Uri.parse('$_backendBase/user/visited-locations?location_ids=$locationIdsParam'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200 && mounted) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final visited = (data['visited'] as List)
+            .map((v) => (v as Map<String, dynamic>)['location_id'] as String)
+            .toSet();
+        setState(() => _visitedTourLocations = visited);
+        // Persist locally for offline
+        final prefs = await SharedPreferences.getInstance();
+        prefs.setStringList('tour_visited_${tour.id}', visited.toList());
+      }
+    } catch (e) {
+      debugPrint('MapScreen fetchServerVisited error: $e');
     }
   }
 
@@ -249,15 +278,20 @@ class _MapScreenState extends State<MapScreen> {
     _trackTourProgress(narration.locationId);
     if (mounted) setState(() => _narrationVisible = true);
 
-    // Start auto-scroll listener
-    _positionStreamSub?.cancel();
-    _positionStreamSub =
-        _audioService.positionStream.listen(_onAudioPositionChanged);
+    if (narration.isTourProgress) {
+      // Tour progress notification — show card briefly, no audio playback
+      await Future.delayed(const Duration(seconds: 4));
+    } else {
+      // Normal story narration — play audio
+      _positionStreamSub?.cancel();
+      _positionStreamSub =
+          _audioService.positionStream.listen(_onAudioPositionChanged);
 
-    await _audioService.playBase64(narration.audioBase64);
+      await _audioService.playBase64(narration.audioBase64);
 
-    _positionStreamSub?.cancel();
-    _positionStreamSub = null;
+      _positionStreamSub?.cancel();
+      _positionStreamSub = null;
+    }
 
     // Advance queue (confirms played to backend, removes from local queue)
     _tripService.advanceQueue();
@@ -606,6 +640,17 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _buildGuideAvatar(PendingNarration? narration) {
+    if (narration?.isTourProgress == true) {
+      return Container(
+        width: 48,
+        height: 48,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          color: Color(0xFFFFF8E1),
+        ),
+        child: const Icon(Icons.emoji_events, color: Color(0xFFF9A825), size: 26),
+      );
+    }
     if (narration?.guidePhotoUrl != null) {
       return ClipOval(
         child: Image.network(

@@ -5,6 +5,8 @@ class Tour {
   final String? photoUrl;
   final int locationCount;
   final List<String> locationIds;
+  final int locationsVisited;
+  final String? enrolledAt;
 
   const Tour({
     required this.id,
@@ -13,6 +15,8 @@ class Tour {
     this.photoUrl,
     required this.locationCount,
     required this.locationIds,
+    this.locationsVisited = 0,
+    this.enrolledAt,
   });
 
   factory Tour.fromJson(Map<String, dynamic> j) => Tour(
@@ -25,6 +29,8 @@ class Tour {
                 ?.map((e) => e as String)
                 .toList() ??
             [],
+        locationsVisited: (j['locations_visited'] as num?)?.toInt() ?? 0,
+        enrolledAt: j['enrolled_at'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -34,5 +40,7 @@ class Tour {
         'photo_url': photoUrl,
         'location_count': locationCount,
         'location_ids': locationIds,
+        'locations_visited': locationsVisited,
+        'enrolled_at': enrolledAt,
       };
 }

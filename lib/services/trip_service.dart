@@ -18,6 +18,8 @@ class PendingNarration {
   final String narrationText;
   final String? guidePhotoUrl;
   final String? locationId;
+  final String topic;
+  final String? tourId;
 
   const PendingNarration({
     required this.narrationId,
@@ -27,7 +29,11 @@ class PendingNarration {
     this.narrationText = '',
     this.guidePhotoUrl,
     this.locationId,
+    this.topic = 'location',
+    this.tourId,
   });
+
+  bool get isTourProgress => topic == 'tour_progress';
 }
 
 /// Manages trip state, GPS pinging, and narration queue.
@@ -59,6 +65,7 @@ class TripService extends ChangeNotifier {
 
   TripState get tripState => _tripState;
   String? get tripId => _tripId;
+  String get deviceId => _deviceId;
   bool get isActive => _tripState == TripState.active;
 
   /// The narration at the front of the local queue (being played or about to play).
@@ -153,6 +160,11 @@ class TripService extends ChangeNotifier {
       final token = await AuthService.getIdToken();
       if (token != null) headers['Authorization'] = 'Bearer $token';
 
+      // Include preferred guide as preferred_narrators if set
+      final prefs = await SharedPreferences.getInstance();
+      final preferredGuide = prefs.getString('preferred_guide') ?? '';
+      final preferredNarrators = preferredGuide.isNotEmpty ? [preferredGuide] : <String>[];
+
       final response = await http.post(
         Uri.parse('$_backendBase/ping'),
         headers: headers,
@@ -161,6 +173,7 @@ class TripService extends ChangeNotifier {
           'latitude': position.latitude,
           'longitude': position.longitude,
           'force_new_session': forceNewSession,
+          'preferred_narrators': preferredNarrators,
         }),
       ).timeout(const Duration(seconds: 15));
 
@@ -218,6 +231,8 @@ class TripService extends ChangeNotifier {
               ? '$_backendBase/tour-guides/$guideId/photo'
               : null,
           locationId: data['location_id'] as String?,
+          topic: data['topic'] as String? ?? 'location',
+          tourId: data['tour_id'] as String?,
         );
 
         _narrationQueue.add(narration);
@@ -281,10 +296,48 @@ class TripService extends ChangeNotifier {
       await http.post(
         Uri.parse('$_backendBase/session/end'),
         headers: headers,
-        body: jsonEncode({'session_id': tripId}),
+        body: jsonEncode({'device_id': _deviceId}),
       ).timeout(const Duration(seconds: 10));
     } catch (e) {
       debugPrint('TripService endSession error: $e');
+    }
+  }
+
+  // ── Tour enrollment ──────────────────────────────────────────────────────
+
+  Future<bool> joinTour(String tourId) async {
+    try {
+      final token = await AuthService.getIdToken();
+      if (token == null) return false;
+      final response = await http.post(
+        Uri.parse('$_backendBase/user/tours/$tourId/join'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      ).timeout(const Duration(seconds: 10));
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('TripService joinTour error: $e');
+      return false;
+    }
+  }
+
+  Future<bool> leaveTour(String tourId) async {
+    try {
+      final token = await AuthService.getIdToken();
+      if (token == null) return false;
+      final response = await http.post(
+        Uri.parse('$_backendBase/user/tours/$tourId/leave'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+      ).timeout(const Duration(seconds: 10));
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('TripService leaveTour error: $e');
+      return false;
     }
   }
 
