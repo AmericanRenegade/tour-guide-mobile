@@ -538,7 +538,7 @@ class _MapScreenState extends State<MapScreen> {
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 350),
       curve: Curves.easeOutCubic,
-      bottom: _narrationVisible ? 120 : -320,
+      bottom: _narrationVisible ? 120 : -500,
       left: 16,
       right: 16,
       child: AnimatedSlide(
@@ -571,7 +571,7 @@ class _MapScreenState extends State<MapScreen> {
                                   ? narration!.storyTitle!
                                   : narration?.locationName ?? '',
                               style: const TextStyle(
-                                  fontWeight: FontWeight.bold, fontSize: 16),
+                                  fontWeight: FontWeight.bold, fontSize: 18),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
@@ -579,7 +579,7 @@ class _MapScreenState extends State<MapScreen> {
                               Text(
                                 narration!.locationName,
                                 style: const TextStyle(
-                                    color: Colors.grey, fontSize: 12),
+                                    color: Colors.grey, fontSize: 14),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -587,7 +587,7 @@ class _MapScreenState extends State<MapScreen> {
                               Text(
                                 narration!.narrator,
                                 style: const TextStyle(
-                                    color: Colors.grey, fontSize: 12),
+                                    color: Colors.grey, fontSize: 14),
                               ),
                           ],
                         ),
@@ -603,7 +603,7 @@ class _MapScreenState extends State<MapScreen> {
                             '${_tripService.currentPlayingIndex} of ${_tripService.totalNarrationsInBatch}',
                             style: const TextStyle(
                               color: _teal,
-                              fontSize: 11,
+                              fontSize: 13,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
@@ -615,14 +615,14 @@ class _MapScreenState extends State<MapScreen> {
                     const SizedBox(height: 10),
                     const Divider(height: 1),
                     const SizedBox(height: 8),
-                    SizedBox(
-                      height: 77,
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 160),
                       child: ShaderMask(
                         shaderCallback: (bounds) => const LinearGradient(
                           begin: Alignment.topCenter,
                           end: Alignment.bottomCenter,
                           colors: [Colors.white, Colors.white, Colors.transparent],
-                          stops: [0.0, 0.7, 1.0],
+                          stops: [0.0, 0.75, 1.0],
                         ).createShader(bounds),
                         blendMode: BlendMode.dstIn,
                         child: SingleChildScrollView(
@@ -631,8 +631,8 @@ class _MapScreenState extends State<MapScreen> {
                           child: Text(
                             narration!.narrationText,
                             style: const TextStyle(
-                              fontSize: 13,
-                              height: 1.4,
+                              fontSize: 15,
+                              height: 1.5,
                               color: Color(0xFF444444),
                             ),
                           ),
@@ -651,7 +651,7 @@ class _MapScreenState extends State<MapScreen> {
                           child: ElevatedButton.icon(
                             onPressed: _skipNarration,
                             icon: const Icon(Icons.skip_next, size: 20),
-                            label: const Text('Skip', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                            label: const Text('Skip', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: const Color(0xFFFBBF24), // amber-400
                               foregroundColor: Colors.black87,
@@ -700,7 +700,7 @@ class _MapScreenState extends State<MapScreen> {
                           child: const Text(
                             'Feedback',
                             style: TextStyle(
-                              fontSize: 13,
+                              fontSize: 15,
                               color: Color(0xFF2563EB), // blue-600
                               decoration: TextDecoration.underline,
                               decorationColor: Color(0xFF2563EB),
