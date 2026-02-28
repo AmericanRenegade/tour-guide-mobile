@@ -146,16 +146,10 @@ class _LoginScreenState extends State<LoginScreen>
     });
   }
 
-  /// Extract a short display name: "Kim, the Tour Lead" → "Kim"
-  String _displayName(String fullName) {
-    final comma = fullName.indexOf(',');
-    return comma > 0 ? fullName.substring(0, comma).trim() : fullName.trim();
-  }
-
   Widget _guideCircle(Map<String, dynamic> guide) {
     final id = guide['id'] as String;
     final name = guide['name'] as String? ?? '';
-    final label = _displayName(name);
+    final label = name.trim();
     return SizedBox(
       width: _circleSize,
       height: _circleSize,
@@ -203,7 +197,7 @@ class _LoginScreenState extends State<LoginScreen>
               painter: _CurvedTextPainter(
                 text: label,
                 radius: _circleSize / 2 - 3,
-                fontSize: label.length > 10 ? 11 : 13,
+                fontSize: label.length > 20 ? 9 : label.length > 14 ? 10.5 : 12,
               ),
             ),
         ],
