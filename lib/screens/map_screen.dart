@@ -485,18 +485,16 @@ class _MapScreenState extends State<MapScreen> {
                   ))
               .toList(),
         ),
-        // Zone overlays — polygons
+        // Zone overlays — polygons (single and multi-ring)
         PolygonLayer(
           polygons: _locations
               .where((loc) => loc.isPolygon)
-              .map((loc) => Polygon(
-                    points: loc.polygonCoordinates
-                        .map((c) => LatLng(c[0], c[1]))
-                        .toList(),
+              .expand((loc) => loc.allPolygonRings.map((ring) => Polygon(
+                    points: ring.map((c) => LatLng(c[0], c[1])).toList(),
                     color: const Color(0x330d9488),
                     borderColor: _teal,
                     borderStrokeWidth: 1,
-                  ))
+                  )))
               .toList(),
         ),
         // POI markers
