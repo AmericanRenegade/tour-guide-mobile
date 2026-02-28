@@ -29,6 +29,10 @@ class _LoginScreenState extends State<LoginScreen>
   static const double _circleSize = 150.0;
   static const double _vSpacing = 170.0;
 
+  // Pre-built circle widgets + their static x positions (built once on fetch)
+  List<Widget> _circleWidgets = [];
+  List<double> _circleXPositions = [];
+
   @override
   void initState() {
     super.initState();
@@ -62,9 +66,27 @@ class _LoginScreenState extends State<LoginScreen>
         final list = (data['tour_guides'] as List)
             .map((g) => g as Map<String, dynamic>)
             .toList();
-        if (mounted) setState(() => _guides = list);
+        if (mounted) {
+          setState(() {
+            _guides = list;
+            _buildCircleWidgets();
+          });
+        }
       }
     } catch (_) {}
+  }
+
+  /// Pre-build all circle widgets once so animation frames only change
+  /// Transform.translate offsets (paint-only, no layout).
+  void _buildCircleWidgets() {
+    _circleWidgets = [];
+    _circleXPositions = [];
+    for (int i = 0; i < _guides.length; i++) {
+      final guide = _guides[i];
+      _circleWidgets.add(RepaintBoundary(child: _guideCircle(guide)));
+      // x position will be set once we know screen width (in build)
+      _circleXPositions.add(i.isEven ? 0.25 : 0.75);
+    }
   }
 
   // ─── Auth handlers ──────────────────────────────────────────────────────────
@@ -109,7 +131,7 @@ class _LoginScreenState extends State<LoginScreen>
   // ─── Scrolling guide circles background ─────────────────────────────────────
 
   Widget _buildScrollingGuides() {
-    if (_guides.isEmpty) return const SizedBox.shrink();
+    if (_circleWidgets.isEmpty) return const SizedBox.shrink();
 
     return LayoutBuilder(builder: (context, constraints) {
       final h = constraints.maxHeight;
@@ -118,25 +140,27 @@ class _LoginScreenState extends State<LoginScreen>
       final patternH = n * _vSpacing;
       final repeats = (h / patternH).ceil() + 2;
 
+      // Pre-compute static x offsets in pixels
+      final xPixels = <double>[];
+      for (int i = 0; i < n; i++) {
+        xPixels.add(_circleXPositions[i] * w - _circleSize / 2);
+      }
+
       return AnimatedBuilder(
         animation: _scrollAnim,
         builder: (context, _) {
-          final offset = _scrollAnim.value * patternH;
+          final scrollOffset = _scrollAnim.value * patternH;
           final circles = <Widget>[];
 
           for (int r = 0; r < repeats; r++) {
             for (int i = 0; i < n; i++) {
-              final guide = _guides[i];
-              final y = r * patternH + i * _vSpacing - offset;
-              final x = i.isEven
-                  ? w * 0.25 - _circleSize / 2
-                  : w * 0.75 - _circleSize / 2;
-
-              circles.add(Positioned(
-                left: x,
-                top: y,
-                child: _guideCircle(guide),
-              ));
+              final y = r * patternH + i * _vSpacing - scrollOffset;
+              circles.add(
+                Transform.translate(
+                  offset: Offset(xPixels[i], y),
+                  child: _circleWidgets[i], // cached widget
+                ),
+              );
             }
           }
 
@@ -155,7 +179,6 @@ class _LoginScreenState extends State<LoginScreen>
       height: _circleSize,
       child: Stack(
         children: [
-          // Circle with photo
           Container(
             width: _circleSize,
             height: _circleSize,
@@ -190,7 +213,6 @@ class _LoginScreenState extends State<LoginScreen>
               ),
             ),
           ),
-          // Curved name along the bottom
           if (label.isNotEmpty)
             CustomPaint(
               size: const Size(_circleSize, _circleSize),
@@ -428,7 +450,6 @@ class _CurvedTextPainter extends CustomPainter {
       letterSpacing: 1.2,
     );
 
-    // Measure each character
     final tp = TextPainter(textDirection: TextDirection.ltr);
     final charWidths = <double>[];
     for (int i = 0; i < text.length; i++) {
@@ -438,11 +459,9 @@ class _CurvedTextPainter extends CustomPainter {
     }
     final totalWidth = charWidths.fold(0.0, (a, b) => a + b);
 
-    // Place text along the inner bottom arc
     final textRadius = radius - fontSize / 2 - 4;
     final totalAngle = totalWidth / textRadius;
 
-    // Dark arc background behind the text
     final bgPaint = Paint()
       ..color = const Color(0x70000000)
       ..style = PaintingStyle.stroke
@@ -455,8 +474,7 @@ class _CurvedTextPainter extends CustomPainter {
       bgPaint,
     );
 
-    // Draw each character along the arc
-    var angle = pi / 2 + totalAngle / 2; // start at left side of bottom arc
+    var angle = pi / 2 + totalAngle / 2;
     for (int i = 0; i < text.length; i++) {
       tp.text = TextSpan(text: text[i], style: style);
       tp.layout();
