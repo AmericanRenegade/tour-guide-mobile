@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import '../auth_service.dart';
@@ -38,7 +39,7 @@ class _LoginScreenState extends State<LoginScreen>
     }
     _scrollAnim = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 30),
+      duration: const Duration(seconds: 45),
     )..repeat();
     _fetchGuides();
   }
@@ -127,7 +128,6 @@ class _LoginScreenState extends State<LoginScreen>
             for (int i = 0; i < n; i++) {
               final guide = _guides[i];
               final y = r * patternH + i * _vSpacing - offset;
-              // Stagger: even indices left, odd indices right
               final x = i.isEven
                   ? w * 0.25 - _circleSize / 2
                   : w * 0.75 - _circleSize / 2;
@@ -146,41 +146,67 @@ class _LoginScreenState extends State<LoginScreen>
     });
   }
 
+  /// Extract a short display name: "Kim, the Tour Lead" → "Kim"
+  String _displayName(String fullName) {
+    final comma = fullName.indexOf(',');
+    return comma > 0 ? fullName.substring(0, comma).trim() : fullName.trim();
+  }
+
   Widget _guideCircle(Map<String, dynamic> guide) {
     final id = guide['id'] as String;
     final name = guide['name'] as String? ?? '';
-    return Container(
+    final label = _displayName(name);
+    return SizedBox(
       width: _circleSize,
       height: _circleSize,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: const Color(0xFFe0f2f1),
-        border: Border.all(color: Colors.white, width: 3),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.10),
-            blurRadius: 10,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      child: ClipOval(
-        child: Image.network(
-          '$_backendBase/tour-guides/$id/photo',
-          width: _circleSize,
-          height: _circleSize,
-          fit: BoxFit.cover,
-          errorBuilder: (_, _, _) => Center(
-            child: Text(
-              name.isNotEmpty ? name[0].toUpperCase() : '?',
-              style: const TextStyle(
-                fontSize: 48,
-                fontWeight: FontWeight.bold,
-                color: Color(0xFF0d9488),
+      child: Stack(
+        children: [
+          // Circle with photo
+          Container(
+            width: _circleSize,
+            height: _circleSize,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: const Color(0xFFe0f2f1),
+              border: Border.all(color: Colors.white, width: 3),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.10),
+                  blurRadius: 10,
+                  offset: const Offset(0, 3),
+                ),
+              ],
+            ),
+            child: ClipOval(
+              child: Image.network(
+                '$_backendBase/tour-guides/$id/photo',
+                width: _circleSize,
+                height: _circleSize,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => Center(
+                  child: Text(
+                    name.isNotEmpty ? name[0].toUpperCase() : '?',
+                    style: const TextStyle(
+                      fontSize: 48,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF0d9488),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
-        ),
+          // Curved name along the bottom
+          if (label.isNotEmpty)
+            CustomPaint(
+              size: const Size(_circleSize, _circleSize),
+              painter: _CurvedTextPainter(
+                text: label,
+                radius: _circleSize / 2 - 3,
+                fontSize: label.length > 10 ? 11 : 13,
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -193,10 +219,8 @@ class _LoginScreenState extends State<LoginScreen>
       backgroundColor: Colors.white,
       body: Stack(
         children: [
-          // Background: scrolling guide circles
           Positioned.fill(child: _buildScrollingGuides()),
 
-          // Foreground: compact, semi-transparent login panel
           SafeArea(
             child: Center(
               child: SingleChildScrollView(
@@ -236,7 +260,6 @@ class _LoginScreenState extends State<LoginScreen>
                       ),
                       const SizedBox(height: 20),
 
-                      // Google
                       OutlinedButton.icon(
                         onPressed: _loading ? null : _handleGoogle,
                         icon: const Icon(Icons.login, size: 18),
@@ -264,7 +287,6 @@ class _LoginScreenState extends State<LoginScreen>
                       ]),
                       const SizedBox(height: 16),
 
-                      // Email
                       SizedBox(
                         height: 44,
                         child: TextField(
@@ -386,4 +408,82 @@ class _LoginScreenState extends State<LoginScreen>
       ),
     );
   }
+}
+
+// ─── Curved text painter ──────────────────────────────────────────────────────
+
+class _CurvedTextPainter extends CustomPainter {
+  final String text;
+  final double radius;
+  final double fontSize;
+
+  _CurvedTextPainter({
+    required this.text,
+    required this.radius,
+    this.fontSize = 13,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+
+    final style = TextStyle(
+      fontSize: fontSize,
+      color: Colors.white,
+      fontWeight: FontWeight.w700,
+      letterSpacing: 1.2,
+    );
+
+    // Measure each character
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+    final charWidths = <double>[];
+    for (int i = 0; i < text.length; i++) {
+      tp.text = TextSpan(text: text[i], style: style);
+      tp.layout();
+      charWidths.add(tp.width);
+    }
+    final totalWidth = charWidths.fold(0.0, (a, b) => a + b);
+
+    // Place text along the inner bottom arc
+    final textRadius = radius - fontSize / 2 - 4;
+    final totalAngle = totalWidth / textRadius;
+
+    // Dark arc background behind the text
+    final bgPaint = Paint()
+      ..color = const Color(0x70000000)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = fontSize + 8;
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: textRadius),
+      pi / 2 - totalAngle / 2 - 0.15,
+      totalAngle + 0.30,
+      false,
+      bgPaint,
+    );
+
+    // Draw each character along the arc
+    var angle = pi / 2 + totalAngle / 2; // start at left side of bottom arc
+    for (int i = 0; i < text.length; i++) {
+      tp.text = TextSpan(text: text[i], style: style);
+      tp.layout();
+
+      final charAngle = charWidths[i] / textRadius;
+      angle -= charAngle / 2;
+
+      canvas.save();
+      canvas.translate(
+        center.dx + textRadius * cos(angle),
+        center.dy + textRadius * sin(angle),
+      );
+      canvas.rotate(angle - pi / 2);
+      tp.paint(canvas, Offset(-tp.width / 2, -tp.height / 2));
+      canvas.restore();
+
+      angle -= charAngle / 2;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CurvedTextPainter old) =>
+      text != old.text || radius != old.radius || fontSize != old.fontSize;
 }
