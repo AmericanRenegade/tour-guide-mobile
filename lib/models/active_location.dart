@@ -46,40 +46,16 @@ class ActiveLocation {
   }
 
   bool get isPolygon =>
-      triggerGeometry != null &&
-      (triggerGeometry!['type'] == 'polygon' || triggerGeometry!['type'] == 'multipolygon');
+      triggerGeometry != null && triggerGeometry!['type'] == 'multipolygon';
 
   /// All polygon rings as lists of [lat, lng] pairs.
-  /// For 'polygon': returns a single-element list.
-  /// For 'multipolygon': returns one list per ring.
   List<List<List<double>>> get allPolygonRings {
-    if (triggerGeometry == null) return [];
-    final type = triggerGeometry!['type'];
-
-    if (type == 'polygon') {
-      final coords = triggerGeometry!['coordinates'] as List?;
-      if (coords == null) return [];
-      return [
-        coords.map<List<double>>((c) => [(c[0] as num).toDouble(), (c[1] as num).toDouble()]).toList()
-      ];
-    }
-
-    if (type == 'multipolygon') {
-      final polygons = triggerGeometry!['polygons'] as List?;
-      if (polygons == null) return [];
-      return polygons.map<List<List<double>>>((ring) {
-        final coords = ring as List;
-        return coords.map<List<double>>((c) => [(c[0] as num).toDouble(), (c[1] as num).toDouble()]).toList();
-      }).toList();
-    }
-
-    return [];
-  }
-
-  /// Backward-compatible: returns flat coordinates for a single polygon.
-  /// For multipolygon, returns the first ring.
-  List<List<double>> get polygonCoordinates {
-    final rings = allPolygonRings;
-    return rings.isNotEmpty ? rings.first : [];
+    if (triggerGeometry == null || triggerGeometry!['type'] != 'multipolygon') return [];
+    final polygons = triggerGeometry!['polygons'] as List?;
+    if (polygons == null) return [];
+    return polygons.map<List<List<double>>>((ring) {
+      final coords = ring as List;
+      return coords.map<List<double>>((c) => [(c[0] as num).toDouble(), (c[1] as num).toDouble()]).toList();
+    }).toList();
   }
 }
