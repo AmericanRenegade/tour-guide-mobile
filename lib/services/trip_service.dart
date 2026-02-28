@@ -21,6 +21,10 @@ class PendingNarration {
   final String topic;
   final String? tourId;
   final String? storyTitle;
+  final String contentType;   // 'story', 'trivia_question', 'trivia_interstitial', 'trivia_answer', 'tour_progress'
+  final String? groupId;
+  final int groupSeq;
+  final int? revealDelayS;
 
   const PendingNarration({
     required this.narrationId,
@@ -33,9 +37,17 @@ class PendingNarration {
     this.topic = 'location',
     this.tourId,
     this.storyTitle,
+    this.contentType = 'story',
+    this.groupId,
+    this.groupSeq = 0,
+    this.revealDelayS,
   });
 
-  bool get isTourProgress => topic == 'tour_progress';
+  bool get isTourProgress => contentType == 'tour_progress' || topic == 'tour_progress';
+  bool get isTriviaQuestion => contentType == 'trivia_question';
+  bool get isTriviaInterstitial => contentType == 'trivia_interstitial';
+  bool get isTriviaAnswer => contentType == 'trivia_answer';
+  bool get isTrivia => contentType.startsWith('trivia_');
 }
 
 /// Manages trip state, GPS pinging, and narration queue.
@@ -201,7 +213,7 @@ class TripService extends ChangeNotifier {
     _draining = true;
     try {
       while (true) {
-        final result = await _dequeueOne();
+        final result = await _dequeueGroup();
         if (result == null) break; // nothing left
       }
     } finally {
@@ -209,7 +221,10 @@ class TripService extends ChangeNotifier {
     }
   }
 
-  Future<PendingNarration?> _dequeueOne() async {
+  /// Dequeue a narration group from the server. Returns the first narration
+  /// in the group, or null if nothing is available. All narrations in the
+  /// group are added to the local queue.
+  Future<PendingNarration?> _dequeueGroup() async {
     if (_tripId == null) return null;
     try {
       final response = await http.post(
@@ -222,26 +237,60 @@ class TripService extends ChangeNotifier {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         if (data['available'] != true) return null;
 
-        final guideId = data['guide_id'] as String?;
-        final narration = PendingNarration(
-          narrationId: data['narration_id'] as String,
-          locationName: data['subject'] as String? ?? '',
-          narrator: data['narrator'] as String? ?? '',
-          audioBase64: data['audio'] as String? ?? '',
-          narrationText: data['narration_text'] as String? ?? '',
-          guidePhotoUrl: guideId != null
-              ? '$_backendBase/tour-guides/$guideId/photo'
-              : null,
-          locationId: data['location_id'] as String?,
-          topic: data['topic'] as String? ?? 'location',
-          tourId: data['tour_id'] as String?,
-          storyTitle: data['story_title'] as String?,
-        );
+        // Check for narrations array (group-aware response)
+        final narrationsList = data['narrations'] as List?;
+        PendingNarration? first;
 
-        _narrationQueue.add(narration);
+        if (narrationsList != null && narrationsList.isNotEmpty) {
+          // Parse all narrations in the group
+          for (final item in narrationsList) {
+            final m = item as Map<String, dynamic>;
+            final guideId = m['guide_id'] as String?;
+            final narration = PendingNarration(
+              narrationId: m['narration_id'] as String,
+              locationName: m['subject'] as String? ?? '',
+              narrator: m['narrator'] as String? ?? '',
+              audioBase64: m['audio'] as String? ?? '',
+              narrationText: m['narration_text'] as String? ?? '',
+              guidePhotoUrl: guideId != null
+                  ? '$_backendBase/tour-guides/$guideId/photo'
+                  : null,
+              locationId: m['location_id'] as String?,
+              topic: data['topic'] as String? ?? 'location',
+              tourId: m['tour_id'] as String?,
+              storyTitle: m['story_title'] as String?,
+              contentType: m['content_type'] as String? ?? 'story',
+              groupId: data['group_id'] as String?,
+              groupSeq: (m['group_seq'] as num?)?.toInt() ?? 0,
+              revealDelayS: (m['reveal_delay_s'] as num?)?.toInt(),
+            );
+            _narrationQueue.add(narration);
+            first ??= narration;
+          }
+        } else {
+          // Fallback: flat fields (backward compat for older servers)
+          final guideId = data['guide_id'] as String?;
+          first = PendingNarration(
+            narrationId: data['narration_id'] as String,
+            locationName: data['subject'] as String? ?? '',
+            narrator: data['narrator'] as String? ?? '',
+            audioBase64: data['audio'] as String? ?? '',
+            narrationText: data['narration_text'] as String? ?? '',
+            guidePhotoUrl: guideId != null
+                ? '$_backendBase/tour-guides/$guideId/photo'
+                : null,
+            locationId: data['location_id'] as String?,
+            topic: data['topic'] as String? ?? 'location',
+            tourId: data['tour_id'] as String?,
+            storyTitle: data['story_title'] as String?,
+            contentType: data['content_type'] as String? ?? 'story',
+          );
+          _narrationQueue.add(first);
+        }
+
         _totalNarrationsInBatch = _narrationQueue.length + _playedInBatch;
         notifyListeners();
-        return narration;
+        return first;
       }
     } catch (e) {
       debugPrint('TripService dequeue error: $e');

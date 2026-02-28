@@ -76,6 +76,12 @@ class _MapScreenState extends State<MapScreen> {
   bool _narrationMuted = false;
   double _narrationSlideX = 0; // 0 = visible, 1 = slid off right
 
+  // Trivia interstitial state
+  bool _waitingForReveal = false;
+  Completer<void>? _revealCompleter;
+  int _countdownSeconds = 0;
+  Timer? _countdownTimer;
+
   // Active tour
   Tour? _activeTour;
 
@@ -121,6 +127,7 @@ class _MapScreenState extends State<MapScreen> {
     _searchController.dispose();
     _searchFocus.dispose();
     _searchDebounce?.cancel();
+    _countdownTimer?.cancel();
     super.dispose();
   }
 
@@ -235,13 +242,20 @@ class _MapScreenState extends State<MapScreen> {
     _playingNarration = true;
     _skippingNarration = false;
     _narrationPaused = false;
-    if (mounted) setState(() => _narrationVisible = true);
+    if (mounted) setState(() {
+      _narrationVisible = true;
+      _waitingForReveal = false;
+      _countdownSeconds = 0;
+    });
 
     if (narration.isTourProgress) {
       // Tour progress notification — show card briefly, no audio playback
       await Future.delayed(const Duration(seconds: 4));
+    } else if (narration.isTriviaInterstitial) {
+      // Trivia interstitial — pause between question and answer
+      await _handleTriviaInterstitial(narration);
     } else {
-      // Normal story narration — play audio
+      // Normal story / trivia question / trivia answer — play audio
       _positionStreamSub?.cancel();
       _positionStreamSub =
           _audioService.positionStream.listen(_onAudioPositionChanged);
@@ -314,6 +328,62 @@ class _MapScreenState extends State<MapScreen> {
   void _toggleNarrationMute() {
     _audioService.toggleMute();
     setState(() => _narrationMuted = _audioService.isMuted);
+  }
+
+  /// Handle the trivia interstitial pause between question and answer.
+  /// Reads user preference: 'auto' (countdown), 'manual' (tap), 'instant'.
+  Future<void> _handleTriviaInterstitial(PendingNarration narration) async {
+    final prefs = await SharedPreferences.getInstance();
+    final mode = prefs.getString('trivia_reveal_mode') ?? 'auto';
+
+    if (mode == 'instant') {
+      // Skip interstitial entirely
+      return;
+    }
+
+    if (mode == 'manual') {
+      // Wait for user tap
+      _revealCompleter = Completer<void>();
+      if (mounted) setState(() => _waitingForReveal = true);
+      await _revealCompleter!.future;
+      _revealCompleter = null;
+      if (mounted) setState(() => _waitingForReveal = false);
+      return;
+    }
+
+    // Default: 'auto' countdown
+    final seconds = narration.revealDelayS ?? 15;
+    _revealCompleter = Completer<void>();
+    if (mounted) setState(() {
+      _waitingForReveal = true;
+      _countdownSeconds = seconds;
+    });
+
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_countdownSeconds <= 1 || _skippingNarration) {
+        timer.cancel();
+        _countdownTimer = null;
+        if (!(_revealCompleter?.isCompleted ?? true)) {
+          _revealCompleter?.complete();
+        }
+        return;
+      }
+      if (mounted) setState(() => _countdownSeconds--);
+    });
+
+    await _revealCompleter!.future;
+    _countdownTimer?.cancel();
+    _countdownTimer = null;
+    _revealCompleter = null;
+    if (mounted) setState(() => _waitingForReveal = false);
+  }
+
+  /// Immediately reveal the trivia answer (tap-to-reveal or skip countdown).
+  void _revealTriviaAnswer() {
+    if (_revealCompleter != null && !_revealCompleter!.isCompleted) {
+      _revealCompleter!.complete();
+    }
   }
 
   void _onAudioPositionChanged(Duration position) {
@@ -563,7 +633,7 @@ class _MapScreenState extends State<MapScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Top row: guide photo + location name + narrator
+                  // Top row: guide photo + title + narrator
                   Row(
                     children: [
                       _buildGuideAvatar(narration),
@@ -574,9 +644,7 @@ class _MapScreenState extends State<MapScreen> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Text(
-                              (narration?.storyTitle ?? '').isNotEmpty
-                                  ? narration!.storyTitle!
-                                  : narration?.locationName ?? '',
+                              _narrationTitle(narration),
                               style: const TextStyle(
                                   fontWeight: FontWeight.bold, fontSize: 18),
                               maxLines: 1,
@@ -590,7 +658,8 @@ class _MapScreenState extends State<MapScreen> {
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
-                            if ((narration?.narrator ?? '').isNotEmpty)
+                            if ((narration?.narrator ?? '').isNotEmpty &&
+                                !(narration?.isTriviaInterstitial ?? false))
                               Text(
                                 narration!.narrator,
                                 style: const TextStyle(
@@ -617,8 +686,42 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                     ],
                   ),
-                  // Narration text (scrolling)
-                  if ((narration?.narrationText ?? '').isNotEmpty) ...[
+                  // Interstitial: countdown or tap-to-reveal
+                  if (narration != null && narration.isTriviaInterstitial && _waitingForReveal) ...[
+                    const SizedBox(height: 16),
+                    if (_countdownSeconds > 0) ...[
+                      Text(
+                        'Answer in $_countdownSeconds s...',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF7C3AED), // purple-600
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    SizedBox(
+                      width: double.infinity,
+                      height: 44,
+                      child: ElevatedButton.icon(
+                        onPressed: _revealTriviaAnswer,
+                        icon: const Icon(Icons.lightbulb_outline, size: 20),
+                        label: Text(
+                          _countdownSeconds > 0 ? 'Reveal Now' : 'Tap to Reveal Answer',
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF7C3AED), // purple-600
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+                        ),
+                      ),
+                    ),
+                  ],
+                  // Narration text (scrolling) — for stories & trivia Q/A
+                  if ((narration?.narrationText ?? '').isNotEmpty &&
+                      !(narration?.isTriviaInterstitial ?? false)) ...[
                     const SizedBox(height: 10),
                     const Divider(height: 1),
                     const SizedBox(height: 8),
@@ -648,7 +751,10 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ],
                   // Controls row: Skip, Pause/Play, Mute, Feedback
-                  if (narration != null && !narration.isTourProgress) ...[
+                  // Hidden for tour progress and trivia interstitial
+                  if (narration != null &&
+                      !narration.isTourProgress &&
+                      !narration.isTriviaInterstitial) ...[
                     const SizedBox(height: 10),
                     Row(
                       children: [
@@ -726,6 +832,16 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  /// Title text for the narration card, varying by content type.
+  String _narrationTitle(PendingNarration? narration) {
+    if (narration == null) return '';
+    if (narration.isTriviaQuestion) return 'Trivia';
+    if (narration.isTriviaInterstitial) return 'Think About It...';
+    if (narration.isTriviaAnswer) return 'Answer';
+    if ((narration.storyTitle ?? '').isNotEmpty) return narration.storyTitle!;
+    return narration.locationName;
+  }
+
   Widget _buildGuideAvatar(PendingNarration? narration) {
     if (narration?.isTourProgress == true) {
       return Container(
@@ -736,6 +852,43 @@ class _MapScreenState extends State<MapScreen> {
           color: Color(0xFFFFF8E1),
         ),
         child: const Icon(Icons.emoji_events, color: Color(0xFFF9A825), size: 32),
+      );
+    }
+    if (narration?.isTriviaQuestion == true) {
+      return Container(
+        width: 60,
+        height: 60,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          color: Color(0xFFF3E8FF), // purple-100
+        ),
+        child: const Center(
+          child: Text('❓', style: TextStyle(fontSize: 28)),
+        ),
+      );
+    }
+    if (narration?.isTriviaInterstitial == true) {
+      return Container(
+        width: 60,
+        height: 60,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          color: Color(0xFFF3E8FF), // purple-100
+        ),
+        child: const Icon(Icons.timer, color: Color(0xFF7C3AED), size: 32),
+      );
+    }
+    if (narration?.isTriviaAnswer == true) {
+      return Container(
+        width: 60,
+        height: 60,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          color: Color(0xFFDCFCE7), // green-100
+        ),
+        child: const Center(
+          child: Text('💡', style: TextStyle(fontSize: 28)),
+        ),
       );
     }
     if (narration?.guidePhotoUrl != null) {

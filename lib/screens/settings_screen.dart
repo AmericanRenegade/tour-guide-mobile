@@ -19,6 +19,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<Map<String, dynamic>> _guides = [];
   String _preferredGuide = '';
   String _distanceUnit = 'miles';
+  String _triviaRevealMode = 'auto'; // 'auto', 'manual', 'instant'
   bool _loading = true;
 
   @override
@@ -31,6 +32,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     _preferredGuide = prefs.getString('preferred_guide') ?? '';
     _distanceUnit = prefs.getString('distance_unit') ?? 'miles';
+    _triviaRevealMode = prefs.getString('trivia_reveal_mode') ?? 'auto';
 
     try {
       final response = await http
@@ -73,6 +75,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _distanceUnit = unit);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('distance_unit', unit);
+  }
+
+  Future<void> _setTriviaRevealMode(String? mode) async {
+    if (mode == null) return;
+    setState(() => _triviaRevealMode = mode);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('trivia_reveal_mode', mode);
   }
 
   @override
@@ -151,6 +160,46 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       RadioListTile<String>(
                         title: Text('Kilometers'),
                         value: 'km',
+                        activeColor: _teal,
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 32),
+
+                // ── Trivia Answer Reveal ──
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Text(
+                    'Trivia Answer Reveal',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.grey,
+                    ),
+                  ),
+                ),
+                RadioGroup<String>(
+                  groupValue: _triviaRevealMode,
+                  onChanged: _setTriviaRevealMode,
+                  child: const Column(
+                    children: [
+                      RadioListTile<String>(
+                        title: Text('Auto (countdown)'),
+                        subtitle: Text('Answer reveals after a countdown'),
+                        value: 'auto',
+                        activeColor: _teal,
+                      ),
+                      RadioListTile<String>(
+                        title: Text('Manual (tap to reveal)'),
+                        subtitle: Text('Tap a button to see the answer'),
+                        value: 'manual',
+                        activeColor: _teal,
+                      ),
+                      RadioListTile<String>(
+                        title: Text('Instant (no pause)'),
+                        subtitle: Text('Answer plays immediately'),
+                        value: 'instant',
                         activeColor: _teal,
                       ),
                     ],
