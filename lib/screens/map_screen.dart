@@ -82,6 +82,12 @@ class _MapScreenState extends State<MapScreen> {
   int _countdownSeconds = 0;
   Timer? _countdownTimer;
 
+  // "Up next" countdown state
+  int _upNextSeconds = 0;
+  Timer? _upNextTimer;
+  bool _upNextVisible = false;
+  double _narrationOpacity = 1.0;
+
   // Active tour
   Tour? _activeTour;
 
@@ -128,6 +134,7 @@ class _MapScreenState extends State<MapScreen> {
     _searchFocus.dispose();
     _searchDebounce?.cancel();
     _countdownTimer?.cancel();
+    _upNextTimer?.cancel();
     super.dispose();
   }
 
@@ -231,6 +238,11 @@ class _MapScreenState extends State<MapScreen> {
   // ── Narration ──────────────────────────────────────────────────────────────
 
   void _onTripChanged() {
+    // Cancel up-next banner if trip ended
+    if (_tripService.tripState == TripState.idle && _upNextSeconds > 0) {
+      _cancelUpNext();
+      if (mounted) setState(() {});
+    }
     if (_tripService.pendingNarration != null && !_playingNarration) {
       _playNarration();
     }
@@ -242,8 +254,11 @@ class _MapScreenState extends State<MapScreen> {
     _playingNarration = true;
     _skippingNarration = false;
     _narrationPaused = false;
+    // Cancel any running up-next banner
+    _cancelUpNext();
     if (mounted) setState(() {
       _narrationVisible = true;
+      _narrationOpacity = 1.0;
       _waitingForReveal = false;
       _countdownSeconds = 0;
     });
@@ -271,7 +286,7 @@ class _MapScreenState extends State<MapScreen> {
     final wasSkipped = _skippingNarration;
     _skippingNarration = false;
 
-    // If more narrations in queue, play next
+    // If more narrations in queue and ready immediately, play next
     if (_tripService.pendingNarration != null) {
       // Reset scroll for the next narration
       if (_narrationScrollController.hasClients) {
@@ -293,13 +308,59 @@ class _MapScreenState extends State<MapScreen> {
       }
     }
 
-    // No more narrations — hide the card, then reset slide position
+    // No more narrations ready now — fade out the card
+    if (mounted) setState(() => _narrationOpacity = 0.0);
+    await Future.delayed(const Duration(milliseconds: 500));
     if (mounted) setState(() => _narrationVisible = false);
     _playingNarration = false;
     // Reset slideX after card has animated off-screen
-    Future.delayed(const Duration(milliseconds: 400), () {
-      if (mounted) setState(() => _narrationSlideX = 0);
+    if (mounted) setState(() => _narrationSlideX = 0);
+
+    // Check if there's an up-next narration behind a breathe gap
+    _startUpNextCountdown();
+  }
+
+  void _startUpNextCountdown() {
+    final remaining = _tripService.breatheSecondsRemaining;
+    final upNext = _tripService.upNextNarration;
+    if (remaining < 3 || upNext == null) return; // too short for banner
+    if (!mounted) return;
+
+    // Wait 1s pause after card fades before showing banner
+    Future.delayed(const Duration(seconds: 1), () {
+      if (!mounted || _playingNarration) return;
+      final displaySeconds = _tripService.breatheSecondsRemaining - 1; // close 1s early
+      if (displaySeconds <= 0) {
+        _onTripChanged(); // gap already elapsed, trigger next
+        return;
+      }
+      setState(() {
+        _upNextSeconds = displaySeconds;
+        _upNextVisible = true;
+      });
+      _upNextTimer?.cancel();
+      _upNextTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (_upNextSeconds <= 1 || _playingNarration) {
+          t.cancel();
+          _upNextTimer = null;
+          // Fade out banner
+          if (mounted) setState(() => _upNextVisible = false);
+          Future.delayed(const Duration(milliseconds: 500), () {
+            if (mounted) setState(() => _upNextSeconds = 0);
+            _onTripChanged(); // re-check pendingNarration
+          });
+          return;
+        }
+        if (mounted) setState(() => _upNextSeconds--);
+      });
     });
+  }
+
+  void _cancelUpNext() {
+    _upNextTimer?.cancel();
+    _upNextTimer = null;
+    _upNextSeconds = 0;
+    _upNextVisible = false;
   }
 
   void _skipNarration() {
@@ -515,6 +576,7 @@ class _MapScreenState extends State<MapScreen> {
         body: Stack(
           children: [
             _buildMap(),
+            _buildUpNextBanner(),
             _buildNarrationCard(),
             _buildCenterButton(),
             _buildTripControls(),
@@ -608,6 +670,129 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  // ── "Up next" banner ───────────────────────────────────────────────────────
+
+  Widget _buildUpNextBanner() {
+    final upNext = _tripService.upNextNarration;
+    final showBanner = _upNextSeconds > 0 && upNext != null && !_narrationVisible;
+    return AnimatedPositioned(
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeOutCubic,
+      bottom: showBanner && _upNextVisible ? 120 : -200,
+      left: 16,
+      right: 16,
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 500),
+        opacity: _upNextVisible ? 1.0 : 0.0,
+        child: Card(
+          elevation: 4,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          color: const Color(0xFFF8FAFC), // slate-50
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            child: Row(
+              children: [
+                // Guide avatar (36x36)
+                _buildSmallGuideAvatar(upNext),
+                const SizedBox(width: 10),
+                // Story title + location
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Up next',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.grey.shade500,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        (upNext?.storyTitle ?? '').isNotEmpty
+                            ? upNext!.storyTitle!
+                            : upNext?.locationName ?? '',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if ((upNext?.locationName ?? '').isNotEmpty &&
+                          (upNext?.storyTitle ?? '').isNotEmpty)
+                        Text(
+                          upNext!.locationName,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade600,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                // Countdown pill
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: _teal.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    '${_upNextSeconds}s',
+                    style: const TextStyle(
+                      color: _teal,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSmallGuideAvatar(PendingNarration? narration) {
+    const double size = 36;
+    if (narration?.guidePhotoUrl != null) {
+      return ClipOval(
+        child: Image.network(
+          narration!.guidePhotoUrl!,
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => Container(
+            width: size,
+            height: size,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              color: Color(0xFFe0f2f1),
+            ),
+            child: const Icon(Icons.volume_up, color: _teal, size: 18),
+          ),
+        ),
+      );
+    }
+    return Container(
+      width: size,
+      height: size,
+      decoration: const BoxDecoration(
+        shape: BoxShape.circle,
+        color: Color(0xFFe0f2f1),
+      ),
+      child: const Icon(Icons.volume_up, color: _teal, size: 18),
+    );
+  }
+
   // ── Narration card ─────────────────────────────────────────────────────────
 
   Widget _buildNarrationCard() {
@@ -623,8 +808,8 @@ class _MapScreenState extends State<MapScreen> {
         curve: Curves.easeInCubic,
         offset: Offset(_narrationSlideX * 1.5, 0),
         child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 250),
-          opacity: _narrationSlideX > 0 ? 0.0 : 1.0,
+          duration: Duration(milliseconds: _narrationSlideX > 0 ? 250 : 500),
+          opacity: _narrationSlideX > 0 ? 0.0 : _narrationOpacity,
           child: Card(
             elevation: 8,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),

@@ -408,11 +408,10 @@ class TripService extends ChangeNotifier {
 
   // ── Priority resolution ─────────────────────────────────────────────────────
 
-  PendingNarration? _resolveNext() {
-    if (_narrationPool.isEmpty) {
-      debugPrint('RESOLVE pool empty');
-      return null;
-    }
+  /// Select the next candidate from the pool (ignoring breathe timing).
+  /// Used by both _resolveNext() and the public up-next getters.
+  PendingNarration? _selectCandidate() {
+    if (_narrationPool.isEmpty) return null;
 
     // 1. Trivia group continuation (atomic — no breathe/priority/geofence)
     if (_activeGroupId != null) {
@@ -420,15 +419,12 @@ class TripService extends ChangeNotifier {
           .where((n) => n.groupId == _activeGroupId)
           .toList()
         ..sort((a, b) => a.groupSeq.compareTo(b.groupSeq));
-      if (groupItems.isNotEmpty) {
-        return groupItems.first;
-      }
+      if (groupItems.isNotEmpty) return groupItems.first;
       _activeGroupId = null; // group exhausted
     }
 
     // 2. Filter to items in geofence (or items without location data)
     final eligible = _narrationPool.where(_isInGeofence).toList();
-    debugPrint('RESOLVE pool=${_narrationPool.length} eligible=${eligible.length} lastPlayed=$_lastPlaybackEndedAt');
     if (eligible.isEmpty) return null;
 
     // 3. Sort by priority (higher = more specific location = plays first),
@@ -439,9 +435,18 @@ class TripService extends ChangeNotifier {
       if (priCmp != 0) return priCmp;
       return a.playOrder.compareTo(b.playOrder);
     });
-    final candidate = eligible.first;
+    return eligible.first;
+  }
 
-    // 4. Check breathe/delay timing
+  PendingNarration? _resolveNext() {
+    final candidate = _selectCandidate();
+    if (candidate == null) {
+      debugPrint('RESOLVE pool empty or no eligible');
+      return null;
+    }
+    debugPrint('RESOLVE pool=${_narrationPool.length} lastPlayed=$_lastPlaybackEndedAt');
+
+    // Check breathe/delay timing
     //    delay_s > 0 → admin explicitly set this story's gap (use it)
     //    delay_s == 0 → no specific gap, fall back to server default breathe
     //    User min breathe is always applied as a floor on top.
@@ -456,6 +461,28 @@ class TripService extends ChangeNotifier {
     }
 
     return candidate;
+  }
+
+  /// The next narration that will play after the breathe gap.
+  /// Returns null if pool is empty or a narration is currently being served.
+  PendingNarration? get upNextNarration {
+    if (_currentlyServed != null) return null;
+    return _selectCandidate();
+  }
+
+  /// Seconds remaining in the breathe gap for the next candidate.
+  /// Returns 0 if no gap is active.
+  int get breatheSecondsRemaining {
+    if (_lastPlaybackEndedAt == null) return 0;
+    final candidate = _selectCandidate();
+    if (candidate == null) return 0;
+    final storyDelay = candidate.delayS > 0
+        ? candidate.delayS.toDouble()
+        : _defaultBreatheS;
+    final effectiveWait = max(storyDelay, _userMinBreatheS);
+    final elapsed =
+        DateTime.now().difference(_lastPlaybackEndedAt!).inSeconds;
+    return max(0, effectiveWait.toInt() - elapsed);
   }
 
   bool _isInGeofence(PendingNarration n) {
