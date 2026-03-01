@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
@@ -25,6 +26,14 @@ class PendingNarration {
   final String? groupId;
   final int groupSeq;
   final int? revealDelayS;
+  // Pacing fields
+  final String? storyId;
+  final String? triviaId;
+  final double? locationLat;
+  final double? locationLng;
+  final double geofenceRadiusM;
+  final String locationType;
+  final int delayS;
 
   const PendingNarration({
     required this.narrationId,
@@ -41,6 +50,13 @@ class PendingNarration {
     this.groupId,
     this.groupSeq = 0,
     this.revealDelayS,
+    this.storyId,
+    this.triviaId,
+    this.locationLat,
+    this.locationLng,
+    this.geofenceRadiusM = 300,
+    this.locationType = 'Other',
+    this.delayS = 0,
   });
 
   bool get isTourProgress => contentType == 'tour_progress' || topic == 'tour_progress';
@@ -50,7 +66,7 @@ class PendingNarration {
   bool get isTrivia => contentType.startsWith('trivia_');
 }
 
-/// Manages trip state, GPS pinging, and narration queue.
+/// Manages trip state, GPS pinging, and narration pool with priority scheduling.
 ///
 /// State machine:
 ///   idle → active    startTrip()   force_new_session ping → save tripId → start 15s timer
@@ -59,7 +75,8 @@ class PendingNarration {
 ///   active/paused→idle stopTrip()  POST /session/end → clear tripId + timer
 ///
 /// Narration flow:
-///   /ping queues stories server-side → mobile eagerly dequeues all into local queue
+///   /ping queues stories server-side → mobile eagerly dequeues all into local pool
+///   → _resolveNext() picks highest-priority in-geofence narration respecting breathe timer
 ///   → MapScreen plays sequentially → advanceQueue() confirms each as played
 class TripService extends ChangeNotifier {
   static const String _backendBase =
@@ -71,23 +88,54 @@ class TripService extends ChangeNotifier {
   String _deviceId = '';
   Timer? _pingTimer;
 
-  // ── Narration queue ───────────────────────────────────────────────────────
-  final List<PendingNarration> _narrationQueue = [];
+  // ── Narration pool (priority-based, replaces FIFO queue) ────────────────
+  final List<PendingNarration> _narrationPool = [];
   bool _draining = false;
   int _totalNarrationsInBatch = 0;
   int _playedInBatch = 0;
+
+  // ── Dedup (discard duplicates if backend re-sends) ──────────────────────
+  final Set<String> _seenStoryIds = {};
+  final Set<String> _seenTriviaIds = {};
+
+  // ── Position (updated on each ping, used for geofence checks) ───────────
+  double _currentLat = 0;
+  double _currentLng = 0;
+
+  // ── Pacing ──────────────────────────────────────────────────────────────
+  double _defaultBreatheS = 120;
+  double _userMinBreatheS = 0;
+  DateTime? _lastPlaybackEndedAt;
+  Timer? _breatheTimer;
+
+  // ── Trivia group atomicity ──────────────────────────────────────────────
+  String? _activeGroupId;
+
+  // ── Currently served to MapScreen ───────────────────────────────────────
+  PendingNarration? _currentlyServed;
 
   TripState get tripState => _tripState;
   String? get tripId => _tripId;
   String get deviceId => _deviceId;
   bool get isActive => _tripState == TripState.active;
 
-  /// The narration at the front of the local queue (being played or about to play).
-  PendingNarration? get pendingNarration =>
-      _narrationQueue.isNotEmpty ? _narrationQueue.first : null;
+  /// The narration currently being played or next to play.
+  /// Uses priority scheduling: highest-priority in-geofence item wins.
+  /// Returns null during breathe cooldown or if pool is empty.
+  PendingNarration? get pendingNarration {
+    if (_currentlyServed != null) return _currentlyServed;
+    final next = _resolveNext();
+    if (next != null) {
+      _currentlyServed = next;
+      if (next.isTrivia && next.groupId != null) {
+        _activeGroupId = next.groupId;
+      }
+    }
+    return _currentlyServed;
+  }
 
-  /// Number of narrations remaining in the local queue.
-  int get narrationQueueLength => _narrationQueue.length;
+  /// Number of narrations remaining in the local pool.
+  int get narrationQueueLength => _narrationPool.length;
 
   /// Total narrations in the current batch (for "X of Y" display).
   int get totalNarrationsInBatch => _totalNarrationsInBatch;
@@ -97,6 +145,7 @@ class TripService extends ChangeNotifier {
 
   TripService() {
     _loadDeviceId();
+    _loadUserPreferences();
   }
 
   Future<void> _loadDeviceId() async {
@@ -107,6 +156,16 @@ class TripService extends ChangeNotifier {
       await prefs.setString('device_id', id);
     }
     _deviceId = id;
+  }
+
+  Future<void> _loadUserPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    _userMinBreatheS = (prefs.getInt('min_breathe_s') ?? 0).toDouble();
+  }
+
+  /// Reload user preferences (call from Settings when min breathe time changes).
+  Future<void> refreshPreferences() async {
+    await _loadUserPreferences();
   }
 
   // ── Trip lifecycle ──────────────────────────────────────────────────────────
@@ -141,7 +200,7 @@ class TripService extends ChangeNotifier {
     final tripId = _tripId;
     _tripState = TripState.idle;
     _tripId = null;
-    _clearQueue();
+    _clearPool();
     notifyListeners();
     if (tripId != null) {
       await _endSession(tripId);
@@ -164,11 +223,17 @@ class TripService extends ChangeNotifier {
       if (!serviceEnabled) return;
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) return;
+          permission == LocationPermission.deniedForever) {
+        return;
+      }
 
       final position = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
       ).timeout(const Duration(seconds: 10));
+
+      // Update position for geofence checks
+      _currentLat = position.latitude;
+      _currentLng = position.longitude;
 
       final headers = <String, String>{'Content-Type': 'application/json'};
       final token = await AuthService.getIdToken();
@@ -201,6 +266,9 @@ class TripService extends ChangeNotifier {
           _drainServerQueue();
         }
       }
+
+      // Position changed → re-evaluate geofence eligibility
+      notifyListeners();
     } catch (e) {
       debugPrint('TripService ping error: $e');
     }
@@ -223,7 +291,7 @@ class TripService extends ChangeNotifier {
 
   /// Dequeue a narration group from the server. Returns the first narration
   /// in the group, or null if nothing is available. All narrations in the
-  /// group are added to the local queue.
+  /// group are added to the local pool.
   Future<PendingNarration?> _dequeueGroup() async {
     if (_tripId == null) return null;
     try {
@@ -237,6 +305,12 @@ class TripService extends ChangeNotifier {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         if (data['available'] != true) return null;
 
+        // Read server breathe config
+        final breathe = data['default_breathe_s'];
+        if (breathe != null) {
+          _defaultBreatheS = (breathe as num).toDouble();
+        }
+
         // Check for narrations array (group-aware response)
         final narrationsList = data['narrations'] as List?;
         PendingNarration? first;
@@ -245,50 +319,23 @@ class TripService extends ChangeNotifier {
           // Parse all narrations in the group
           for (final item in narrationsList) {
             final m = item as Map<String, dynamic>;
-            final guideId = m['guide_id'] as String?;
-            final narration = PendingNarration(
-              narrationId: m['narration_id'] as String,
-              locationName: m['subject'] as String? ?? '',
-              narrator: m['narrator'] as String? ?? '',
-              audioBase64: m['audio'] as String? ?? '',
-              narrationText: m['narration_text'] as String? ?? '',
-              guidePhotoUrl: guideId != null
-                  ? '$_backendBase/tour-guides/$guideId/photo'
-                  : null,
-              locationId: m['location_id'] as String?,
-              topic: data['topic'] as String? ?? 'location',
-              tourId: m['tour_id'] as String?,
-              storyTitle: m['story_title'] as String?,
-              contentType: m['content_type'] as String? ?? 'story',
-              groupId: data['group_id'] as String?,
-              groupSeq: (m['group_seq'] as num?)?.toInt() ?? 0,
-              revealDelayS: (m['reveal_delay_s'] as num?)?.toInt(),
-            );
-            _narrationQueue.add(narration);
+            final narration = _parseNarration(m, data);
+            if (_isDuplicate(narration)) continue;
+            _narrationPool.add(narration);
+            _markSeen(narration);
             first ??= narration;
           }
         } else {
           // Fallback: flat fields (backward compat for older servers)
-          final guideId = data['guide_id'] as String?;
-          first = PendingNarration(
-            narrationId: data['narration_id'] as String,
-            locationName: data['subject'] as String? ?? '',
-            narrator: data['narrator'] as String? ?? '',
-            audioBase64: data['audio'] as String? ?? '',
-            narrationText: data['narration_text'] as String? ?? '',
-            guidePhotoUrl: guideId != null
-                ? '$_backendBase/tour-guides/$guideId/photo'
-                : null,
-            locationId: data['location_id'] as String?,
-            topic: data['topic'] as String? ?? 'location',
-            tourId: data['tour_id'] as String?,
-            storyTitle: data['story_title'] as String?,
-            contentType: data['content_type'] as String? ?? 'story',
-          );
-          _narrationQueue.add(first);
+          final narration = _parseNarration(data, data);
+          if (!_isDuplicate(narration)) {
+            _narrationPool.add(narration);
+            _markSeen(narration);
+            first = narration;
+          }
         }
 
-        _totalNarrationsInBatch = _narrationQueue.length + _playedInBatch;
+        _totalNarrationsInBatch = _narrationPool.length + _playedInBatch;
         notifyListeners();
         return first;
       }
@@ -298,18 +345,161 @@ class TripService extends ChangeNotifier {
     return null;
   }
 
+  PendingNarration _parseNarration(Map<String, dynamic> m, Map<String, dynamic> envelope) {
+    final guideId = m['guide_id'] as String?;
+    return PendingNarration(
+      narrationId: m['narration_id'] as String,
+      locationName: m['subject'] as String? ?? '',
+      narrator: m['narrator'] as String? ?? '',
+      audioBase64: m['audio'] as String? ?? '',
+      narrationText: m['narration_text'] as String? ?? '',
+      guidePhotoUrl: guideId != null
+          ? '$_backendBase/tour-guides/$guideId/photo'
+          : null,
+      locationId: m['location_id'] as String?,
+      topic: envelope['topic'] as String? ?? m['topic'] as String? ?? 'location',
+      tourId: m['tour_id'] as String?,
+      storyTitle: m['story_title'] as String?,
+      contentType: m['content_type'] as String? ?? 'story',
+      groupId: envelope['group_id'] as String? ?? m['group_id'] as String?,
+      groupSeq: (m['group_seq'] as num?)?.toInt() ?? 0,
+      revealDelayS: (m['reveal_delay_s'] as num?)?.toInt(),
+      // Pacing fields from enriched dequeue response
+      storyId: m['story_id'] as String?,
+      triviaId: m['trivia_id'] as String?,
+      locationLat: (m['location_lat'] as num?)?.toDouble(),
+      locationLng: (m['location_lng'] as num?)?.toDouble(),
+      geofenceRadiusM: (m['trigger_radius_m'] as num?)?.toDouble() ?? 300,
+      locationType: m['location_type'] as String? ?? 'Other',
+      delayS: (m['delay_s'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  // ── Dedup ───────────────────────────────────────────────────────────────────
+
+  bool _isDuplicate(PendingNarration n) {
+    if (n.storyId != null && _seenStoryIds.contains(n.storyId)) return true;
+    if (n.triviaId != null && _seenTriviaIds.contains(n.triviaId)) return true;
+    return false;
+  }
+
+  void _markSeen(PendingNarration n) {
+    if (n.storyId != null) _seenStoryIds.add(n.storyId!);
+    if (n.triviaId != null) _seenTriviaIds.add(n.triviaId!);
+  }
+
+  // ── Priority resolution ─────────────────────────────────────────────────────
+
+  PendingNarration? _resolveNext() {
+    if (_narrationPool.isEmpty) return null;
+
+    // 1. Trivia group continuation (atomic — no breathe/priority/geofence)
+    if (_activeGroupId != null) {
+      final groupItems = _narrationPool
+          .where((n) => n.groupId == _activeGroupId)
+          .toList()
+        ..sort((a, b) => a.groupSeq.compareTo(b.groupSeq));
+      if (groupItems.isNotEmpty) {
+        return groupItems.first;
+      }
+      _activeGroupId = null; // group exhausted
+    }
+
+    // 2. Filter to items in geofence (or items without location data)
+    final eligible = _narrationPool.where(_isInGeofence).toList();
+    if (eligible.isEmpty) return null;
+
+    // 3. Sort by priority (higher = more specific location = plays first)
+    eligible.sort((a, b) =>
+        _priorityOf(b.locationType).compareTo(_priorityOf(a.locationType)));
+    final candidate = eligible.first;
+
+    // 4. Check breathe/delay timing
+    if (_lastPlaybackEndedAt != null) {
+      final effectiveWait = [
+        candidate.delayS.toDouble(),
+        _defaultBreatheS,
+        _userMinBreatheS,
+      ].reduce(max);
+      final elapsed =
+          DateTime.now().difference(_lastPlaybackEndedAt!).inSeconds;
+      if (elapsed < effectiveWait) return null;
+    }
+
+    return candidate;
+  }
+
+  bool _isInGeofence(PendingNarration n) {
+    if (n.locationLat == null || n.locationLng == null) return true;
+    if (_currentLat == 0 && _currentLng == 0) return true;
+    final dist = _haversineMeters(
+        _currentLat, _currentLng, n.locationLat!, n.locationLng!);
+    return dist <= n.geofenceRadiusM;
+  }
+
+  static int _priorityOf(String locationType) {
+    switch (locationType) {
+      case 'Landmark': return 8;
+      case 'Neighborhood': return 7;
+      case 'Town': return 6;
+      case 'City': return 5;
+      case 'County': return 4;
+      case 'State': return 3;
+      case 'Nation': return 2;
+      case 'World': return 1;
+      default: return 4; // 'Other' → same as County
+    }
+  }
+
+  static double _haversineMeters(
+      double lat1, double lng1, double lat2, double lng2) {
+    const R = 6371000.0; // Earth radius in meters
+    final dLat = _toRad(lat2 - lat1);
+    final dLng = _toRad(lng2 - lng1);
+    final a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(_toRad(lat1)) * cos(_toRad(lat2)) *
+        sin(dLng / 2) * sin(dLng / 2);
+    return R * 2 * atan2(sqrt(a), sqrt(1 - a));
+  }
+
+  static double _toRad(double deg) => deg * pi / 180;
+
+  // ── Breathe timer ───────────────────────────────────────────────────────────
+
+  void _startBreatheTimer() {
+    _breatheTimer?.cancel();
+    final waitS = [_defaultBreatheS, _userMinBreatheS].reduce(max);
+    _breatheTimer = Timer(Duration(seconds: waitS.toInt()), () {
+      _breatheTimer = null;
+      notifyListeners(); // wake up MapScreen to check pendingNarration
+    });
+  }
+
   // ── Queue management (called by MapScreen after playback) ─────────────────
 
-  /// Remove the front narration after playback and confirm it as played.
+  /// Remove the served narration after playback and confirm it as played.
   void advanceQueue() {
-    if (_narrationQueue.isEmpty) return;
-    final played = _narrationQueue.removeAt(0);
+    if (_currentlyServed == null) return;
+    final played = _currentlyServed!;
+    _narrationPool.removeWhere((n) => n.narrationId == played.narrationId);
     _playedInBatch++;
+    _currentlyServed = null;
 
     // Fire-and-forget played confirmation to backend
     _confirmPlayed(played.narrationId);
 
-    if (_narrationQueue.isEmpty) {
+    // Check if trivia group is continuing
+    final groupContinues = played.groupId != null &&
+        _narrationPool.any((n) => n.groupId == played.groupId);
+
+    if (!groupContinues) {
+      // Group done or non-group item → start breathe timer
+      _activeGroupId = null;
+      _lastPlaybackEndedAt = DateTime.now();
+      _startBreatheTimer();
+    }
+
+    if (_narrationPool.isEmpty) {
       _totalNarrationsInBatch = 0;
       _playedInBatch = 0;
     }
@@ -331,11 +521,36 @@ class TripService extends ChangeNotifier {
     }
   }
 
-  void _clearQueue() {
-    _narrationQueue.clear();
+  void _clearPool() {
+    _narrationPool.clear();
+    _seenStoryIds.clear();
+    _seenTriviaIds.clear();
     _totalNarrationsInBatch = 0;
     _playedInBatch = 0;
     _draining = false;
+    _currentlyServed = null;
+    _activeGroupId = null;
+    _lastPlaybackEndedAt = null;
+    _breatheTimer?.cancel();
+    _breatheTimer = null;
+  }
+
+  // ── Clear play history ──────────────────────────────────────────────────────
+
+  /// Call DELETE /user/play-history to reset cross-trip dedup.
+  Future<bool> clearPlayHistory() async {
+    try {
+      final token = await AuthService.getIdToken();
+      if (token == null) return false;
+      final response = await http.delete(
+        Uri.parse('$_backendBase/user/play-history'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 10));
+      return response.statusCode == 200;
+    } catch (e) {
+      debugPrint('TripService clearPlayHistory error: $e');
+      return false;
+    }
   }
 
   // ── Session end ──────────────────────────────────────────────────────────
@@ -396,6 +611,7 @@ class TripService extends ChangeNotifier {
   @override
   void dispose() {
     _pingTimer?.cancel();
+    _breatheTimer?.cancel();
     super.dispose();
   }
 }

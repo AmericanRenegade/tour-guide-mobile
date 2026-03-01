@@ -20,6 +20,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _preferredGuide = '';
   String _distanceUnit = 'miles';
   String _triviaRevealMode = 'auto'; // 'auto', 'manual', 'instant'
+  int _minBreatheS = 0; // 0 = use server default
+  bool _clearingHistory = false;
   bool _loading = true;
 
   @override
@@ -33,6 +35,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _preferredGuide = prefs.getString('preferred_guide') ?? '';
     _distanceUnit = prefs.getString('distance_unit') ?? 'miles';
     _triviaRevealMode = prefs.getString('trivia_reveal_mode') ?? 'auto';
+    _minBreatheS = prefs.getInt('min_breathe_s') ?? 0;
 
     try {
       final response = await http
@@ -82,6 +85,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _triviaRevealMode = mode);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('trivia_reveal_mode', mode);
+  }
+
+  Future<void> _setMinBreatheS(int seconds) async {
+    setState(() => _minBreatheS = seconds);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('min_breathe_s', seconds);
+  }
+
+  Future<void> _clearListenedHistory() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear Listened History'),
+        content: const Text(
+          'This will reset your play history so you can hear stories and trivia again. Continue?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Clear', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+
+    setState(() => _clearingHistory = true);
+    try {
+      final token = await AuthService.getIdToken();
+      if (token == null) return;
+      final response = await http.delete(
+        Uri.parse('$_backendBase/user/play-history'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 10));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(response.statusCode == 200
+              ? 'Listened history cleared'
+              : 'Failed to clear history'),
+        ));
+      }
+    } catch (e) {
+      debugPrint('Settings clearHistory error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to clear history')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _clearingHistory = false);
+    }
   }
 
   @override
@@ -201,6 +259,95 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         subtitle: Text('Answer plays immediately'),
                         value: 'instant',
                         activeColor: _teal,
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 32),
+
+                // ── Min Time Between Stories ──
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Text(
+                    'Min Time Between Stories',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.grey,
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+                  child: Text(
+                    _minBreatheS == 0
+                        ? 'Using server default'
+                        : '${_minBreatheS ~/ 60} min ${_minBreatheS % 60} sec',
+                    style: TextStyle(
+                      fontSize: 16,
+                      color: _minBreatheS == 0 ? Colors.grey : _teal,
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                  child: Slider(
+                    value: _minBreatheS.toDouble(),
+                    min: 0,
+                    max: 600,
+                    divisions: 20,
+                    activeColor: _teal,
+                    label: _minBreatheS == 0
+                        ? 'Default'
+                        : '${_minBreatheS ~/ 60}m ${_minBreatheS % 60}s',
+                    onChanged: (v) => _setMinBreatheS(v.toInt()),
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Text(
+                    'Minimum wait between story narrations. '
+                    'Set to 0 to use the server default.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ),
+                const Divider(height: 32),
+
+                // ── Clear Listened History ──
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Listened History',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.grey,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Clear your play history to hear stories and trivia you\'ve already listened to.',
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        onPressed: _clearingHistory ? null : _clearListenedHistory,
+                        icon: _clearingHistory
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.delete_outline, size: 18),
+                        label: Text(_clearingHistory ? 'Clearing...' : 'Clear Listened History'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.orange,
+                          side: const BorderSide(color: Colors.orange),
+                          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                        ),
                       ),
                     ],
                   ),
