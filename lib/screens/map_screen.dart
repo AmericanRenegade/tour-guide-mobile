@@ -862,12 +862,10 @@ class _MapScreenState extends State<MapScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Text(
-                              _narrationTitle(narration),
+                            _MarqueeText(
+                              text: _narrationTitle(narration),
                               style: const TextStyle(
                                   fontWeight: FontWeight.bold, fontSize: 18),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
                             ),
                             if ((narration?.locationName ?? '').isNotEmpty)
                               Text(
@@ -1666,6 +1664,80 @@ class _SearchOptionsSheetState extends State<_SearchOptionsSheet> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Auto-scrolling marquee text: pause → scroll to end → pause → reset → repeat.
+class _MarqueeText extends StatefulWidget {
+  final String text;
+  final TextStyle? style;
+  const _MarqueeText({required this.text, this.style});
+
+  @override
+  State<_MarqueeText> createState() => _MarqueeTextState();
+}
+
+class _MarqueeTextState extends State<_MarqueeText> {
+  final ScrollController _sc = ScrollController();
+  Timer? _timer;
+  bool _disposed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _startCycle());
+  }
+
+  @override
+  void didUpdateWidget(_MarqueeText old) {
+    super.didUpdateWidget(old);
+    if (old.text != widget.text) {
+      _timer?.cancel();
+      _sc.jumpTo(0);
+      WidgetsBinding.instance.addPostFrameCallback((_) => _startCycle());
+    }
+  }
+
+  void _startCycle() {
+    if (_disposed || !_sc.hasClients) return;
+    final maxScroll = _sc.position.maxScrollExtent;
+    if (maxScroll <= 0) return; // text fits, no scrolling needed
+
+    _timer?.cancel();
+    // Initial pause, then scroll
+    _timer = Timer(const Duration(seconds: 2), () {
+      if (_disposed || !_sc.hasClients) return;
+      // Scroll speed: ~40px/s
+      final durationMs = (maxScroll / 40 * 1000).toInt();
+      _sc.animateTo(maxScroll,
+          duration: Duration(milliseconds: durationMs),
+          curve: Curves.linear);
+      // After scroll completes, pause then reset
+      _timer = Timer(Duration(milliseconds: durationMs + 2000), () {
+        if (_disposed || !_sc.hasClients) return;
+        _sc.jumpTo(0);
+        // Restart the cycle
+        _startCycle();
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _timer?.cancel();
+    _sc.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      controller: _sc,
+      scrollDirection: Axis.horizontal,
+      physics: const NeverScrollableScrollPhysics(),
+      child: Text(widget.text, style: widget.style, maxLines: 1),
     );
   }
 }
