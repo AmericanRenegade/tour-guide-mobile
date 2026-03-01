@@ -176,6 +176,7 @@ class TripService extends ChangeNotifier {
 
   Future<void> startTrip() async {
     if (_tripState != TripState.idle) return;
+    _clearPool(); // ensure clean state (guards against stop/drain race)
     _tripState = TripState.active;
     notifyListeners();
     await _doPing(forceNewSession: true);
@@ -260,12 +261,15 @@ class TripService extends ChangeNotifier {
         }),
       ).timeout(const Duration(seconds: 15));
 
+      debugPrint('PING response status=${response.statusCode}');
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         final sid = data['session_id'] as String?;
         if (sid != null && _tripId == null) { _tripId = sid; }
 
+        final queuedCount = (data['queued_count'] as num?)?.toInt() ?? 0;
         final pendingCount = (data['pending_count'] as num?)?.toInt() ?? 0;
+        debugPrint('PING queued=$queuedCount pending=$pendingCount tripId=$_tripId poolSize=${_narrationPool.length}');
         if (pendingCount > 0 && _tripId != null) {
           _drainServerQueue();
         }
@@ -273,16 +277,20 @@ class TripService extends ChangeNotifier {
 
       // Position changed → re-evaluate geofence eligibility
       notifyListeners();
-    } catch (e) {
-      debugPrint('TripService ping error: $e');
+    } catch (e, st) {
+      debugPrint('TripService ping error: $e\n$st');
     }
   }
 
   // ── Dequeue: eagerly pull all pending narrations from server ──────────────
 
   Future<void> _drainServerQueue() async {
-    if (_draining || _tripId == null) return;
+    if (_draining || _tripId == null) {
+      debugPrint('DRAIN skipped: draining=$_draining tripId=$_tripId');
+      return;
+    }
     _draining = true;
+    debugPrint('DRAIN starting');
     try {
       while (true) {
         final result = await _dequeueGroup();
@@ -290,6 +298,7 @@ class TripService extends ChangeNotifier {
       }
     } finally {
       _draining = false;
+      debugPrint('DRAIN done: poolSize=${_narrationPool.length} seenStories=${_seenStoryIds.length}');
     }
   }
 
@@ -324,7 +333,10 @@ class TripService extends ChangeNotifier {
           for (final item in narrationsList) {
             final m = item as Map<String, dynamic>;
             final narration = _parseNarration(m, data);
-            if (_isDuplicate(narration)) continue;
+            if (_isDuplicate(narration)) {
+              debugPrint('DEQUEUE skip duplicate: storyId=${narration.storyId} triviaId=${narration.triviaId}');
+              continue;
+            }
             _narrationPool.add(narration);
             _markSeen(narration);
             first ??= narration;
@@ -397,7 +409,10 @@ class TripService extends ChangeNotifier {
   // ── Priority resolution ─────────────────────────────────────────────────────
 
   PendingNarration? _resolveNext() {
-    if (_narrationPool.isEmpty) return null;
+    if (_narrationPool.isEmpty) {
+      debugPrint('RESOLVE pool empty');
+      return null;
+    }
 
     // 1. Trivia group continuation (atomic — no breathe/priority/geofence)
     if (_activeGroupId != null) {
@@ -413,6 +428,7 @@ class TripService extends ChangeNotifier {
 
     // 2. Filter to items in geofence (or items without location data)
     final eligible = _narrationPool.where(_isInGeofence).toList();
+    debugPrint('RESOLVE pool=${_narrationPool.length} eligible=${eligible.length} lastPlayed=$_lastPlaybackEndedAt');
     if (eligible.isEmpty) return null;
 
     // 3. Sort by priority (higher = more specific location = plays first),
