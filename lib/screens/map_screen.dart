@@ -451,10 +451,23 @@ class _MapScreenState extends State<MapScreen> {
     final total = _audioService.duration;
     if (total == null || total.inMilliseconds == 0) return;
     if (!_narrationScrollController.hasClients) return;
-    final progress = position.inMilliseconds / total.inMilliseconds;
     final maxScroll = _narrationScrollController.position.maxScrollExtent;
+    if (maxScroll <= 0) return; // text fits without scrolling
+
+    // Delay scroll start by 3 seconds, finish 3 seconds before end.
+    // This gives the user time to read the opening text and ensures
+    // the final lines are visible for a few seconds before the card fades.
+    const startDelayMs = 3000;
+    const endBufferMs = 3000;
+    final totalMs = total.inMilliseconds;
+    final posMs = position.inMilliseconds;
+    final scrollWindowMs = totalMs - startDelayMs - endBufferMs;
+    if (scrollWindowMs <= 0) return; // audio too short to scroll
+
+    final scrollProgress =
+        ((posMs - startDelayMs) / scrollWindowMs).clamp(0.0, 1.0);
     _narrationScrollController
-        .jumpTo((progress * maxScroll).clamp(0.0, maxScroll));
+        .jumpTo((scrollProgress * maxScroll).clamp(0.0, maxScroll));
   }
 
   // ── Search ─────────────────────────────────────────────────────────────────
@@ -797,10 +810,13 @@ class _MapScreenState extends State<MapScreen> {
 
   Widget _buildNarrationCard() {
     final narration = _tripService.pendingNarration;
+    // Top: below pills (safeArea + 62 for search bar + ~40 for pill height + padding)
+    final cardTop = MediaQuery.of(context).padding.top + 62 + 48;
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 350),
       curve: Curves.easeOutCubic,
-      bottom: _narrationVisible ? 120 : -500,
+      top: _narrationVisible ? cardTop : MediaQuery.of(context).size.height + 100,
+      bottom: _narrationVisible ? 120 : MediaQuery.of(context).size.height + 100,
       left: 16,
       right: 16,
       child: AnimatedSlide(
@@ -816,7 +832,7 @@ class _MapScreenState extends State<MapScreen> {
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
-                mainAxisSize: MainAxisSize.min,
+                mainAxisSize: MainAxisSize.max,
                 children: [
                   // Top row: guide photo + title + narrator
                   Row(
@@ -873,7 +889,7 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                   // Interstitial: countdown or tap-to-reveal
                   if (narration != null && narration.isTriviaInterstitial && _waitingForReveal) ...[
-                    const SizedBox(height: 16),
+                    const Spacer(),
                     if (_countdownSeconds > 0) ...[
                       Text(
                         'Answer in $_countdownSeconds s...',
@@ -910,14 +926,13 @@ class _MapScreenState extends State<MapScreen> {
                     const SizedBox(height: 10),
                     const Divider(height: 1),
                     const SizedBox(height: 8),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 160),
+                    Expanded(
                       child: ShaderMask(
                         shaderCallback: (bounds) => const LinearGradient(
                           begin: Alignment.topCenter,
                           end: Alignment.bottomCenter,
                           colors: [Colors.white, Colors.white, Colors.transparent],
-                          stops: [0.0, 0.75, 1.0],
+                          stops: [0.0, 0.85, 1.0],
                         ).createShader(bounds),
                         blendMode: BlendMode.dstIn,
                         child: SingleChildScrollView(
@@ -935,6 +950,11 @@ class _MapScreenState extends State<MapScreen> {
                       ),
                     ),
                   ],
+                  // Absorb remaining space when no text area is present
+                  if ((narration?.narrationText ?? '').isEmpty ||
+                      (narration?.isTriviaInterstitial ?? false))
+                    if (!(narration?.isTriviaInterstitial == true && _waitingForReveal))
+                      const Spacer(),
                   // Controls row: Skip, Pause/Play, Mute, Feedback
                   // Hidden for tour progress and trivia interstitial
                   if (narration != null &&
