@@ -323,7 +323,7 @@ class _MapScreenState extends State<MapScreen> {
   void _startUpNextCountdown() {
     final remaining = _tripService.breatheSecondsRemaining;
     final upNext = _tripService.upNextNarration;
-    if (remaining < 3 || upNext == null) return; // too short for banner
+    if (remaining < 8 || upNext == null) return; // too short for banner
     if (!mounted) return;
 
     // Wait 1s pause after card fades before showing banner
