@@ -238,10 +238,23 @@ class _MapScreenState extends State<MapScreen> {
   // ── Narration ──────────────────────────────────────────────────────────────
 
   void _onTripChanged() {
-    // Cancel up-next banner if trip ended
-    if (_tripService.tripState == TripState.idle && _upNextSeconds > 0) {
-      _cancelUpNext();
+    // Clean up narration card + audio when trip ends
+    if (_tripService.tripState == TripState.idle) {
+      if (_upNextSeconds > 0) _cancelUpNext();
+      if (_playingNarration) {
+        _audioService.stop();
+        _positionStreamSub?.cancel();
+        _positionStreamSub = null;
+        _playingNarration = false;
+        _skippingNarration = false;
+      }
+      if (_narrationVisible) {
+        _narrationVisible = false;
+        _narrationOpacity = 0.0;
+        _narrationSlideX = 0;
+      }
       if (mounted) setState(() {});
+      return;
     }
     if (_tripService.pendingNarration != null && !_playingNarration) {
       _playNarration();
@@ -280,6 +293,9 @@ class _MapScreenState extends State<MapScreen> {
       _positionStreamSub?.cancel();
       _positionStreamSub = null;
     }
+
+    // If trip ended while we were playing, _onTripChanged already cleaned up
+    if (_tripService.tripState == TripState.idle) return;
 
     // Advance queue (confirms played to backend, removes from local queue)
     _tripService.advanceQueue();
@@ -1293,10 +1309,10 @@ class _MapScreenState extends State<MapScreen> {
       right: 16,
       child: Material(
         elevation: 4,
-        borderRadius: BorderRadius.circular(28),
+        borderRadius: BorderRadius.circular(16),
         color: Colors.white,
         child: InkWell(
-          borderRadius: BorderRadius.circular(28),
+          borderRadius: BorderRadius.circular(16),
           onTap: _searchActive
               ? null
               : () => setState(() {
