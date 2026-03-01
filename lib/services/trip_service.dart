@@ -109,7 +109,6 @@ class TripService extends ChangeNotifier {
   // ── Pacing ──────────────────────────────────────────────────────────────
   double _defaultBreatheS = 3;
   double _userMinBreatheS = 0;
-  DateTime? _lastPlaybackStartedAt;
   DateTime? _lastPlaybackEndedAt;
   Timer? _breatheTimer;
 
@@ -132,7 +131,6 @@ class TripService extends ChangeNotifier {
     final next = _resolveNext();
     if (next != null) {
       _currentlyServed = next;
-      _lastPlaybackStartedAt = DateTime.now();
       if (next.isTrivia && next.groupId != null) {
         _activeGroupId = next.groupId;
       }
@@ -524,14 +522,8 @@ class TripService extends ChangeNotifier {
 
   void _startBreatheTimer() {
     _breatheTimer?.cancel();
-    final waitS = [_defaultBreatheS, _userMinBreatheS].reduce(max);
-    // Subtract time already elapsed since playback started, so skipping
-    // mid-narration doesn't reset the full breathe gap.
-    final elapsed = _lastPlaybackEndedAt != null
-        ? DateTime.now().difference(_lastPlaybackEndedAt!).inSeconds
-        : 0;
-    final remainingS = max(0, waitS.toInt() - elapsed);
-    _breatheTimer = Timer(Duration(seconds: remainingS), () {
+    final waitS = [_defaultBreatheS, _userMinBreatheS].reduce(max).toInt();
+    _breatheTimer = Timer(Duration(seconds: waitS), () {
       _breatheTimer = null;
       notifyListeners(); // wake up MapScreen to check pendingNarration
     });
@@ -556,10 +548,9 @@ class TripService extends ChangeNotifier {
 
     if (!groupContinues) {
       // Group done or non-group item → start breathe timer
-      // Measure from when playback STARTED (not ended) so skipping doesn't
-      // add a full breathe gap on top of the time already spent playing.
+      // Breathe gap = time from when audio ends (or is skipped) to next narration.
       _activeGroupId = null;
-      _lastPlaybackEndedAt = _lastPlaybackStartedAt ?? DateTime.now();
+      _lastPlaybackEndedAt = DateTime.now();
       _startBreatheTimer();
     }
 
