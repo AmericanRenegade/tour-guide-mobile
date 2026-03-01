@@ -715,7 +715,8 @@ class _MapScreenState extends State<MapScreen> {
         opacity: _upNextVisible ? 1.0 : 0.0,
         child: Card(
           elevation: 4,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           color: const Color(0xFFF8FAFC), // slate-50
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -826,8 +827,8 @@ class _MapScreenState extends State<MapScreen> {
 
   Widget _buildNarrationCard() {
     final narration = _tripService.pendingNarration;
-    // Top: below pills (safeArea + 62 for search bar + ~40 for pill height + padding)
-    final cardTop = MediaQuery.of(context).padding.top + 62 + 48;
+    // Top: below pills (safeArea + 68 for search bar + gap + ~40 for pill height + padding)
+    final cardTop = MediaQuery.of(context).padding.top + 68 + 48;
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 350),
       curve: Curves.easeOutCubic,
@@ -844,6 +845,7 @@ class _MapScreenState extends State<MapScreen> {
           opacity: _narrationSlideX > 0 ? 0.0 : _narrationOpacity,
           child: Card(
             elevation: 8,
+            margin: EdgeInsets.zero,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -1178,6 +1180,7 @@ class _MapScreenState extends State<MapScreen> {
       right: 16,
       child: Card(
         elevation: 6,
+        margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -1377,7 +1380,7 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _buildSearchResults() {
-    final top = MediaQuery.of(context).padding.top + 62;
+    final top = MediaQuery.of(context).padding.top + 68;
     return Positioned(
       top: top,
       left: 16,
@@ -1455,7 +1458,7 @@ class _MapScreenState extends State<MapScreen> {
   // ── Pills row (Tours + Settings) ──────────────────────────────────────────
 
   Widget _buildPills() {
-    final top = MediaQuery.of(context).padding.top + 62;
+    final top = MediaQuery.of(context).padding.top + 68;
     return Positioned(
       top: top,
       left: 16,
