@@ -32,6 +32,7 @@ class PendingNarration {
   final double? locationLat;
   final double? locationLng;
   final double geofenceRadiusM;
+  final String triggerGeometryType; // 'circle', 'multipolygon', 'polygon'
   final String locationType;
   final int delayS;
 
@@ -55,6 +56,7 @@ class PendingNarration {
     this.locationLat,
     this.locationLng,
     this.geofenceRadiusM = 300,
+    this.triggerGeometryType = 'circle',
     this.locationType = 'Other',
     this.delayS = 0,
   });
@@ -370,6 +372,7 @@ class TripService extends ChangeNotifier {
       locationLat: (m['location_lat'] as num?)?.toDouble(),
       locationLng: (m['location_lng'] as num?)?.toDouble(),
       geofenceRadiusM: (m['trigger_radius_m'] as num?)?.toDouble() ?? 300,
+      triggerGeometryType: (m['trigger_geometry'] as Map<String, dynamic>?)?['type'] as String? ?? 'circle',
       locationType: m['location_type'] as String? ?? 'Other',
       delayS: (m['delay_s'] as num?)?.toInt() ?? 0,
     );
@@ -432,6 +435,10 @@ class TripService extends ChangeNotifier {
   bool _isInGeofence(PendingNarration n) {
     if (n.locationLat == null || n.locationLng == null) return true;
     if (_currentLat == 0 && _currentLng == 0) return true;
+    // Polygon-based geometries (multipolygon, polygon): the backend already
+    // verified the user was inside the shape when it queued the story.
+    // Mobile can't recheck polygons, so trust the backend determination.
+    if (n.triggerGeometryType != 'circle') return true;
     final dist = _haversineMeters(
         _currentLat, _currentLng, n.locationLat!, n.locationLng!);
     return dist <= n.geofenceRadiusM;
