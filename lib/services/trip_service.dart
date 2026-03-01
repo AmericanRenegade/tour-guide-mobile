@@ -35,6 +35,7 @@ class PendingNarration {
   final String triggerGeometryType; // 'circle', 'multipolygon', 'polygon'
   final String locationType;
   final int delayS;
+  final int playOrder;
 
   const PendingNarration({
     required this.narrationId,
@@ -59,6 +60,7 @@ class PendingNarration {
     this.triggerGeometryType = 'circle',
     this.locationType = 'Other',
     this.delayS = 0,
+    this.playOrder = 0,
   });
 
   bool get isTourProgress => contentType == 'tour_progress' || topic == 'tour_progress';
@@ -375,6 +377,7 @@ class TripService extends ChangeNotifier {
       triggerGeometryType: (m['trigger_geometry'] as Map<String, dynamic>?)?['type'] as String? ?? 'circle',
       locationType: m['location_type'] as String? ?? 'Other',
       delayS: (m['delay_s'] as num?)?.toInt() ?? 0,
+      playOrder: (m['play_order'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -412,9 +415,14 @@ class TripService extends ChangeNotifier {
     final eligible = _narrationPool.where(_isInGeofence).toList();
     if (eligible.isEmpty) return null;
 
-    // 3. Sort by priority (higher = more specific location = plays first)
-    eligible.sort((a, b) =>
-        _priorityOf(b.locationType).compareTo(_priorityOf(a.locationType)));
+    // 3. Sort by priority (higher = more specific location = plays first),
+    //    then by play_order (admin-configured sequence within same priority)
+    eligible.sort((a, b) {
+      final priCmp =
+          _priorityOf(b.locationType).compareTo(_priorityOf(a.locationType));
+      if (priCmp != 0) return priCmp;
+      return a.playOrder.compareTo(b.playOrder);
+    });
     final candidate = eligible.first;
 
     // 4. Check breathe/delay timing
