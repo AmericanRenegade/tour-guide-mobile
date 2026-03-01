@@ -442,12 +442,14 @@ class TripService extends ChangeNotifier {
     final candidate = eligible.first;
 
     // 4. Check breathe/delay timing
+    //    delay_s > 0 → admin explicitly set this story's gap (use it)
+    //    delay_s == 0 → no specific gap, fall back to server default breathe
+    //    User min breathe is always applied as a floor on top.
     if (_lastPlaybackEndedAt != null) {
-      final effectiveWait = [
-        candidate.delayS.toDouble(),
-        _defaultBreatheS,
-        _userMinBreatheS,
-      ].reduce(max);
+      final storyDelay = candidate.delayS > 0
+          ? candidate.delayS.toDouble()
+          : _defaultBreatheS;
+      final effectiveWait = max(storyDelay, _userMinBreatheS);
       final elapsed =
           DateTime.now().difference(_lastPlaybackEndedAt!).inSeconds;
       if (elapsed < effectiveWait) return null;
