@@ -26,9 +26,10 @@ class AudioService {
       await tempFile.writeAsBytes(bytes);
       await _player.setFilePath(tempFile.path);
       await _player.play();
-      // Wait until playback completes.
-      await _player.playerStateStream
-          .firstWhere((s) => s.processingState == ProcessingState.completed);
+      // Wait until playback completes or is stopped.
+      await _player.playerStateStream.firstWhere((s) =>
+          s.processingState == ProcessingState.completed ||
+          s.processingState == ProcessingState.idle);
     } catch (e) {
       debugPrint('AudioService.playBase64 error: $e');
     }
