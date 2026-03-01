@@ -244,11 +244,6 @@ class TripService extends ChangeNotifier {
       final token = await AuthService.getIdToken();
       if (token != null) headers['Authorization'] = 'Bearer $token';
 
-      // Include preferred guide as preferred_narrators if set
-      final prefs = await SharedPreferences.getInstance();
-      final preferredGuide = prefs.getString('preferred_guide') ?? '';
-      final preferredNarrators = preferredGuide.isNotEmpty ? [preferredGuide] : <String>[];
-
       final response = await http.post(
         Uri.parse('$_backendBase/ping'),
         headers: headers,
@@ -257,7 +252,6 @@ class TripService extends ChangeNotifier {
           'latitude': position.latitude,
           'longitude': position.longitude,
           'force_new_session': forceNewSession,
-          'preferred_narrators': preferredNarrators,
         }),
       ).timeout(const Duration(seconds: 15));
 

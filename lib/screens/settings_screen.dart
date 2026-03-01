@@ -1,8 +1,8 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../auth_service.dart';
+import 'tour_guides_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -16,8 +16,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       'https://tour-guide-backend-production.up.railway.app';
   static const Color _teal = Color(0xFF0d9488);
 
-  List<Map<String, dynamic>> _guides = [];
-  String _preferredGuide = '';
   String _distanceUnit = 'miles';
   String _triviaRevealMode = 'auto'; // 'auto', 'manual', 'instant'
   int _minBreatheS = 0; // 0 = use server default
@@ -32,45 +30,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
-    _preferredGuide = prefs.getString('preferred_guide') ?? '';
     _distanceUnit = prefs.getString('distance_unit') ?? 'miles';
     _triviaRevealMode = prefs.getString('trivia_reveal_mode') ?? 'auto';
     _minBreatheS = prefs.getInt('min_breathe_s') ?? 0;
-
-    try {
-      final response = await http
-          .get(Uri.parse('$_backendBase/tour-guides'))
-          .timeout(const Duration(seconds: 10));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        final guides = (data['tour_guides'] as List)
-            .map((g) => g as Map<String, dynamic>)
-            .toList();
-        if (mounted) setState(() => _guides = guides);
-
-        // Auto-select first guide if no preference saved
-        if (_preferredGuide.isEmpty && guides.isNotEmpty) {
-          final firstName = guides.first['name'] as String? ?? '';
-          if (firstName.isNotEmpty) {
-            _setPreferredGuide(firstName);
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('Settings fetchGuides error: $e');
-    }
-
     if (mounted) setState(() => _loading = false);
-  }
-
-  Future<void> _setPreferredGuide(String? name) async {
-    setState(() => _preferredGuide = name ?? '');
-    final prefs = await SharedPreferences.getInstance();
-    if (name == null || name.isEmpty) {
-      await prefs.remove('preferred_guide');
-    } else {
-      await prefs.setString('preferred_guide', name);
-    }
   }
 
   Future<void> _setDistanceUnit(String? unit) async {
@@ -154,41 +117,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ? const Center(child: CircularProgressIndicator())
           : ListView(
               children: [
-                // ── Preferred Tour Guide ──
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(16, 20, 16, 8),
-                  child: Text(
-                    'Preferred Tour Guide',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey,
+                // ── Tour Guides ──
+                ListTile(
+                  leading: const Icon(Icons.people, color: _teal),
+                  title: const Text('Tour Guides'),
+                  subtitle: const Text('Lead narrator & guide preferences'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const TourGuidesScreen(),
                     ),
-                  ),
-                ),
-                RadioGroup<String>(
-                  groupValue: _preferredGuide,
-                  onChanged: _setPreferredGuide,
-                  child: Column(
-                    children: [
-                      RadioListTile<String>(
-                        title: const Text('No preference'),
-                        subtitle: const Text('Hear from different guides'),
-                        value: '',
-                        toggleable: true,
-                        activeColor: _teal,
-                      ),
-                      ..._guides.map((g) => RadioListTile<String>(
-                            title: Text(g['name'] as String),
-                            subtitle: Text(
-                              g['style'] as String? ?? '',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            value: g['name'] as String,
-                            activeColor: _teal,
-                          )),
-                    ],
                   ),
                 ),
                 const Divider(height: 32),
