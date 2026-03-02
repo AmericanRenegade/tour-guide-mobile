@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../auth_service.dart';
+import 'explore_settings_screen.dart';
 import 'tour_guides_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -127,6 +128,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     context,
                     MaterialPageRoute(
                       builder: (_) => const TourGuidesScreen(),
+                    ),
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.explore, color: _teal),
+                  title: const Text('Explore'),
+                  subtitle: const Text('Re-hear cooldown & explore preferences'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const ExploreSettingsScreen(),
                     ),
                   ),
                 ),

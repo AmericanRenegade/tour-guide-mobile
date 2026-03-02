@@ -126,8 +126,6 @@ class _LoginScreenState extends State<LoginScreen>
     }
   }
 
-  void _skip() => Navigator.pushReplacementNamed(context, '/map');
-
   // ─── Scrolling guide circles background ─────────────────────────────────────
 
   Widget _buildScrollingGuides() {
@@ -395,23 +393,6 @@ class _LoginScreenState extends State<LoginScreen>
                               : "Don't have an account? Sign up",
                           style: const TextStyle(
                               color: Colors.black54, fontSize: 12),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-
-                      TextButton(
-                        onPressed: _loading ? null : _skip,
-                        style: TextButton.styleFrom(
-                          minimumSize: Size.zero,
-                          padding: const EdgeInsets.symmetric(
-                              vertical: 4),
-                          tapTargetSize:
-                              MaterialTapTargetSize.shrinkWrap,
-                        ),
-                        child: const Text(
-                          'Continue without account',
-                          style: TextStyle(
-                              color: Colors.grey, fontSize: 12),
                         ),
                       ),
                     ],

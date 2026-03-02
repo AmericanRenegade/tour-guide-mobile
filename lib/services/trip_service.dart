@@ -109,6 +109,7 @@ class TripService extends ChangeNotifier {
   // ── Pacing ──────────────────────────────────────────────────────────────
   double _defaultBreatheS = 3;
   double _userMinBreatheS = 0;
+  int _exploreCooldownDays = 15;
   DateTime? _lastPlaybackEndedAt;
   Timer? _breatheTimer;
 
@@ -165,7 +166,10 @@ class TripService extends ChangeNotifier {
   Future<void> _loadUserPreferences() async {
     final prefs = await SharedPreferences.getInstance();
     _userMinBreatheS = (prefs.getInt('min_breathe_s') ?? 0).toDouble();
+    _exploreCooldownDays = prefs.getInt('explore_cooldown_days') ?? 15;
   }
+
+  Future<void> reloadUserPreferences() async => _loadUserPreferences();
 
   /// Reload user preferences (call from Settings when min breathe time changes).
   Future<void> refreshPreferences() async {
@@ -252,6 +256,7 @@ class TripService extends ChangeNotifier {
           'latitude': position.latitude,
           'longitude': position.longitude,
           'force_new_session': forceNewSession,
+          'explore_cooldown_days': _exploreCooldownDays,
         }),
       ).timeout(const Duration(seconds: 15));
 

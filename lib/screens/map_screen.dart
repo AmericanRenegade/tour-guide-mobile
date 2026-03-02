@@ -1193,8 +1193,8 @@ class _MapScreenState extends State<MapScreen> {
           width: double.infinity,
           child: ElevatedButton.icon(
             onPressed: _tripService.startTrip,
-            icon: const Icon(Icons.play_arrow),
-            label: const Text('Start Trip'),
+            icon: const Icon(Icons.explore),
+            label: const Text('Explore'),
             style: ElevatedButton.styleFrom(
               backgroundColor: _teal,
               foregroundColor: Colors.white,
@@ -1210,7 +1210,7 @@ class _MapScreenState extends State<MapScreen> {
               child: OutlinedButton.icon(
                 onPressed: _tripService.pauseTrip,
                 icon: const Icon(Icons.pause),
-                label: const Text('Pause'),
+                label: const Text('Pause Exploring'),
               ),
             ),
             const SizedBox(width: 12),
@@ -1218,7 +1218,7 @@ class _MapScreenState extends State<MapScreen> {
               child: ElevatedButton.icon(
                 onPressed: () => _confirmStop(),
                 icon: const Icon(Icons.stop),
-                label: const Text('Stop'),
+                label: const Text('Stop Exploring'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.red.shade700,
                   foregroundColor: Colors.white,
@@ -1235,7 +1235,7 @@ class _MapScreenState extends State<MapScreen> {
               child: ElevatedButton.icon(
                 onPressed: _tripService.resumeTrip,
                 icon: const Icon(Icons.play_arrow),
-                label: const Text('Resume'),
+                label: const Text('Resume Exploring'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _teal,
                   foregroundColor: Colors.white,
@@ -1247,7 +1247,7 @@ class _MapScreenState extends State<MapScreen> {
               child: ElevatedButton.icon(
                 onPressed: () => _confirmStop(),
                 icon: const Icon(Icons.stop),
-                label: const Text('Stop'),
+                label: const Text('Stop Exploring'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.red.shade700,
                   foregroundColor: Colors.white,
@@ -1263,15 +1263,15 @@ class _MapScreenState extends State<MapScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('End trip?'),
-        content: const Text('This will end the current trip session.'),
+        title: const Text('Stop exploring?'),
+        content: const Text('This will end the current explore session.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
               child: const Text('Cancel')),
           TextButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('End Trip',
+              child: const Text('Stop Exploring',
                   style: TextStyle(color: Colors.red))),
         ],
       ),
