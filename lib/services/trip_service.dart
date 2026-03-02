@@ -391,13 +391,15 @@ class TripService extends ChangeNotifier {
 
   bool _isDuplicate(PendingNarration n) {
     if (n.storyId != null && _seenStoryIds.contains(n.storyId)) return true;
-    if (n.triviaId != null && _seenTriviaIds.contains(n.triviaId)) return true;
+    // For trivia groups, only dedup on the question (groupSeq 0).
+    // Interstitial and answer share the same triviaId and must pass through.
+    if (n.triviaId != null && n.groupSeq == 0 && _seenTriviaIds.contains(n.triviaId)) return true;
     return false;
   }
 
   void _markSeen(PendingNarration n) {
     if (n.storyId != null) _seenStoryIds.add(n.storyId!);
-    if (n.triviaId != null) _seenTriviaIds.add(n.triviaId!);
+    if (n.triviaId != null && n.groupSeq == 0) _seenTriviaIds.add(n.triviaId!);
   }
 
   // ── Priority resolution ─────────────────────────────────────────────────────
