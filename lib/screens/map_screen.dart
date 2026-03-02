@@ -827,13 +827,13 @@ class _MapScreenState extends State<MapScreen> {
 
   Widget _buildNarrationCard() {
     final narration = _tripService.pendingNarration;
-    // Top: below pills (safeArea + 68 for search bar + gap + ~40 for pill height + padding)
-    final cardTop = MediaQuery.of(context).padding.top + 68 + 48;
+    final maxCardHeight = MediaQuery.of(context).size.height
+        - MediaQuery.of(context).padding.top - 68 - 48 // below pills
+        - 120; // above trip controls
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 350),
       curve: Curves.easeOutCubic,
-      top: _narrationVisible ? cardTop : MediaQuery.of(context).size.height + 100,
-      bottom: _narrationVisible ? 120 : MediaQuery.of(context).size.height + 100,
+      bottom: _narrationVisible ? 120 : -600,
       left: 16,
       right: 16,
       child: AnimatedSlide(
@@ -843,14 +843,16 @@ class _MapScreenState extends State<MapScreen> {
         child: AnimatedOpacity(
           duration: Duration(milliseconds: _narrationSlideX > 0 ? 250 : 500),
           opacity: _narrationSlideX > 0 ? 0.0 : _narrationOpacity,
-          child: Card(
-            elevation: 8,
-            margin: EdgeInsets.zero,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                mainAxisSize: MainAxisSize.max,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: maxCardHeight),
+            child: Card(
+              elevation: 8,
+              margin: EdgeInsets.zero,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
                 children: [
                   // Top row: guide photo + title + narrator
                   Row(
@@ -905,7 +907,7 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                   // Interstitial: countdown or tap-to-reveal
                   if (narration != null && narration.isTriviaInterstitial && _waitingForReveal) ...[
-                    const Spacer(),
+                    const SizedBox(height: 16),
                     if (_countdownSeconds > 0) ...[
                       Text(
                         'Answer in $_countdownSeconds s...',
@@ -942,7 +944,7 @@ class _MapScreenState extends State<MapScreen> {
                     const SizedBox(height: 10),
                     const Divider(height: 1),
                     const SizedBox(height: 8),
-                    Expanded(
+                    Flexible(
                       child: ShaderMask(
                         shaderCallback: (bounds) => const LinearGradient(
                           begin: Alignment.topCenter,
@@ -966,11 +968,6 @@ class _MapScreenState extends State<MapScreen> {
                       ),
                     ),
                   ],
-                  // Absorb remaining space when no text area is present
-                  if ((narration?.narrationText ?? '').isEmpty ||
-                      (narration?.isTriviaInterstitial ?? false))
-                    if (!(narration?.isTriviaInterstitial == true && _waitingForReveal))
-                      const Spacer(),
                   // Controls row: Skip, Pause/Play, Mute, Feedback
                   // Hidden for tour progress and trivia interstitial
                   if (narration != null &&
@@ -1047,6 +1044,7 @@ class _MapScreenState extends State<MapScreen> {
                 ],
               ),
             ),
+          ),
           ),
         ),
       ),
