@@ -3,6 +3,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../auth_service.dart';
 import 'explore_settings_screen.dart';
+import 'trivia_settings_screen.dart';
 import 'tour_guides_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -18,7 +19,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   static const Color _teal = Color(0xFF0d9488);
 
   String _distanceUnit = 'miles';
-  String _triviaRevealMode = 'auto'; // 'auto', 'manual', 'instant'
   int _minBreatheS = 0; // 0 = use server default
   bool _clearingHistory = false;
   bool _loading = true;
@@ -32,7 +32,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
     _distanceUnit = prefs.getString('distance_unit') ?? 'miles';
-    _triviaRevealMode = prefs.getString('trivia_reveal_mode') ?? 'auto';
     _minBreatheS = prefs.getInt('min_breathe_s') ?? 0;
     if (mounted) setState(() => _loading = false);
   }
@@ -42,13 +41,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _distanceUnit = unit);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('distance_unit', unit);
-  }
-
-  Future<void> _setTriviaRevealMode(String? mode) async {
-    if (mode == null) return;
-    setState(() => _triviaRevealMode = mode);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('trivia_reveal_mode', mode);
   }
 
   Future<void> _setMinBreatheS(int seconds) async {
@@ -143,6 +135,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                 ),
+                ListTile(
+                  leading: const Icon(Icons.quiz_outlined, color: _teal),
+                  title: const Text('Trivia'),
+                  subtitle: const Text('Answer reveal & trivia preferences'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const TriviaSettingsScreen(),
+                    ),
+                  ),
+                ),
                 const Divider(height: 32),
 
                 // ── Distance Units ──
@@ -170,46 +174,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       RadioListTile<String>(
                         title: Text('Kilometers'),
                         value: 'km',
-                        activeColor: _teal,
-                      ),
-                    ],
-                  ),
-                ),
-                const Divider(height: 32),
-
-                // ── Trivia Answer Reveal ──
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  child: Text(
-                    'Trivia Answer Reveal',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey,
-                    ),
-                  ),
-                ),
-                RadioGroup<String>(
-                  groupValue: _triviaRevealMode,
-                  onChanged: _setTriviaRevealMode,
-                  child: const Column(
-                    children: [
-                      RadioListTile<String>(
-                        title: Text('Auto (countdown)'),
-                        subtitle: Text('Answer reveals after a countdown'),
-                        value: 'auto',
-                        activeColor: _teal,
-                      ),
-                      RadioListTile<String>(
-                        title: Text('Manual (tap to reveal)'),
-                        subtitle: Text('Tap a button to see the answer'),
-                        value: 'manual',
-                        activeColor: _teal,
-                      ),
-                      RadioListTile<String>(
-                        title: Text('Instant (no pause)'),
-                        subtitle: Text('Answer plays immediately'),
-                        value: 'instant',
                         activeColor: _teal,
                       ),
                     ],
