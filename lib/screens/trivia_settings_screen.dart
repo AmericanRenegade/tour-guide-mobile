@@ -11,7 +11,16 @@ class TriviaSettingsScreen extends StatefulWidget {
 class _TriviaSettingsScreenState extends State<TriviaSettingsScreen> {
   static const Color _teal = Color(0xFF0d9488);
 
+  static const List<(int, String)> _countdownOptions = [
+    (5,  '5 seconds'),
+    (10, '10 seconds (default)'),
+    (15, '15 seconds'),
+    (20, '20 seconds'),
+    (30, '30 seconds'),
+  ];
+
   String _triviaRevealMode = 'auto';
+  int _triviaCountdownS = 10;
   bool _loading = true;
 
   @override
@@ -24,6 +33,7 @@ class _TriviaSettingsScreenState extends State<TriviaSettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       _triviaRevealMode = prefs.getString('trivia_reveal_mode') ?? 'auto';
+      _triviaCountdownS = prefs.getInt('trivia_countdown_s') ?? 10;
       _loading = false;
     });
   }
@@ -33,6 +43,13 @@ class _TriviaSettingsScreenState extends State<TriviaSettingsScreen> {
     setState(() => _triviaRevealMode = mode);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('trivia_reveal_mode', mode);
+  }
+
+  Future<void> _setCountdown(int? seconds) async {
+    if (seconds == null) return;
+    setState(() => _triviaCountdownS = seconds);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('trivia_countdown_s', seconds);
   }
 
   @override
@@ -47,8 +64,9 @@ class _TriviaSettingsScreenState extends State<TriviaSettingsScreen> {
           ? const Center(child: CircularProgressIndicator())
           : ListView(
               children: [
+                // ── Answer Reveal ──
                 const Padding(
-                  padding: EdgeInsets.fromLTRB(16, 20, 16, 8),
+                  padding: EdgeInsets.fromLTRB(16, 20, 16, 4),
                   child: Text(
                     'Answer Reveal',
                     style: TextStyle(
@@ -91,7 +109,62 @@ class _TriviaSettingsScreenState extends State<TriviaSettingsScreen> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 32),
+                const Divider(height: 32),
+
+                // ── Countdown Duration ──
+                AnimatedOpacity(
+                  opacity: _triviaRevealMode == 'auto' ? 1.0 : 0.4,
+                  duration: const Duration(milliseconds: 200),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.fromLTRB(16, 0, 16, 4),
+                        child: Text(
+                          'Countdown Duration',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ),
+                      const Padding(
+                        padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+                        child: Text(
+                          'How long to wait before revealing the answer. '
+                          'Only applies when reveal mode is set to Auto.',
+                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+                        child: InputDecorator(
+                          decoration: const InputDecoration(
+                            border: OutlineInputBorder(),
+                            contentPadding: EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 4),
+                          ),
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<int>(
+                              value: _triviaCountdownS,
+                              isExpanded: true,
+                              items: _countdownOptions
+                                  .map((o) => DropdownMenuItem(
+                                        value: o.$1,
+                                        child: Text(o.$2),
+                                      ))
+                                  .toList(),
+                              onChanged: _triviaRevealMode == 'auto'
+                                  ? _setCountdown
+                                  : null,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ),
     );

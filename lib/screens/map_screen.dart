@@ -110,6 +110,9 @@ class _MapScreenState extends State<MapScreen> {
   // Version
   String _version = '';
 
+  // Map style
+  String _mapStyle = 'regular';
+
   @override
   void initState() {
     super.initState();
@@ -120,6 +123,12 @@ class _MapScreenState extends State<MapScreen> {
     _syncAuth();
     _loadVersion();
     _loadActiveTour();
+    _loadMapStyle();
+  }
+
+  Future<void> _loadMapStyle() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) setState(() => _mapStyle = prefs.getString('map_style') ?? 'regular');
   }
 
   @override
@@ -428,8 +437,8 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
-    // Default: 'auto' countdown
-    final seconds = narration.revealDelayS ?? 15;
+    // Default: 'auto' countdown — user preference overrides server default
+    final seconds = prefs.getInt('trivia_countdown_s') ?? narration.revealDelayS ?? 10;
     _revealCompleter = Completer<void>();
     if (mounted) setState(() {
       _waitingForReveal = true;
@@ -629,34 +638,11 @@ class _MapScreenState extends State<MapScreen> {
       ),
       children: [
         TileLayer(
-          urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          urlTemplate: _mapStyle == 'light'
+              ? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png'
+              : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          subdomains: _mapStyle == 'light' ? const ['a', 'b', 'c', 'd'] : const [],
           userAgentPackageName: 'com.tourguide.app',
-        ),
-        // Zone overlays — circles
-        CircleLayer(
-          circles: _locations
-              .where((loc) => !loc.isPolygon)
-              .map((loc) => CircleMarker(
-                    point: LatLng(loc.lat, loc.lng),
-                    radius: loc.circleRadiusM,
-                    useRadiusInMeter: true,
-                    color: const Color(0x330d9488),
-                    borderColor: _teal,
-                    borderStrokeWidth: 1,
-                  ))
-              .toList(),
-        ),
-        // Zone overlays — polygons (single and multi-ring)
-        PolygonLayer(
-          polygons: _locations
-              .where((loc) => loc.isPolygon)
-              .expand((loc) => loc.allPolygonRings.map((ring) => Polygon(
-                    points: ring.map((c) => LatLng(c[0], c[1])).toList(),
-                    color: const Color(0x330d9488),
-                    borderColor: _teal,
-                    borderStrokeWidth: 1,
-                  )))
-              .toList(),
         ),
         // POI markers
         MarkerLayer(
@@ -1210,7 +1196,7 @@ class _MapScreenState extends State<MapScreen> {
               child: OutlinedButton.icon(
                 onPressed: _tripService.pauseTrip,
                 icon: const Icon(Icons.pause),
-                label: const Text('Pause Exploring'),
+                label: const Text('Pause'),
               ),
             ),
             const SizedBox(width: 12),
@@ -1218,7 +1204,7 @@ class _MapScreenState extends State<MapScreen> {
               child: ElevatedButton.icon(
                 onPressed: () => _confirmStop(),
                 icon: const Icon(Icons.stop),
-                label: const Text('Stop Exploring'),
+                label: const Text('Stop'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.red.shade700,
                   foregroundColor: Colors.white,
@@ -1247,7 +1233,7 @@ class _MapScreenState extends State<MapScreen> {
               child: ElevatedButton.icon(
                 onPressed: () => _confirmStop(),
                 icon: const Icon(Icons.stop),
-                label: const Text('Stop Exploring'),
+                label: const Text('Stop'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.red.shade700,
                   foregroundColor: Colors.white,
@@ -1271,7 +1257,7 @@ class _MapScreenState extends State<MapScreen> {
               child: const Text('Cancel')),
           TextButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Stop Exploring',
+              child: const Text('Stop',
                   style: TextStyle(color: Colors.red))),
         ],
       ),
@@ -1515,10 +1501,13 @@ class _MapScreenState extends State<MapScreen> {
       color: Colors.white,
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => const SettingsScreen()),
-        ),
+        onTap: () async {
+          await Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const SettingsScreen()),
+          );
+          _loadMapStyle();
+        },
         child: const Padding(
           padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           child: Row(
