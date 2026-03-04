@@ -20,6 +20,8 @@ class NearbyPoi {
   final double distanceMiles;
   bool isSaved;
 
+  final bool hasPreview;
+
   NearbyPoi({
     required this.id,
     required this.name,
@@ -28,6 +30,7 @@ class NearbyPoi {
     this.locationType,
     required this.distanceMiles,
     this.isSaved = false,
+    this.hasPreview = false,
   });
 
   factory NearbyPoi.fromJson(Map<String, dynamic> j) => NearbyPoi(
@@ -38,6 +41,7 @@ class NearbyPoi {
         locationType: j['location_type'] as String?,
         distanceMiles: (j['distance_miles'] as num).toDouble(),
         isSaved: j['is_saved'] as bool? ?? false,
+        hasPreview: j['has_preview'] as bool? ?? false,
       );
 }
 
@@ -145,6 +149,10 @@ class TripService extends ChangeNotifier {
 
   // ── Nearby POIs ──────────────────────────────────────────────────────────
   List<NearbyPoi> _nearbyPois = [];
+
+  // ── Interrupt narration (e.g. preview/learn) ─────────────────────────────
+  PendingNarration? _interruptNarration;
+
   DateTime? _lastPlaybackEndedAt;
   Timer? _breatheTimer;
 
@@ -179,6 +187,12 @@ class TripService extends ChangeNotifier {
 
   /// Nearby POIs from the last ping response.
   List<NearbyPoi> get nearbyPois => _nearbyPois;
+
+  /// The interrupt narration (e.g. a preview/learn request).
+  PendingNarration? get interruptNarration => _interruptNarration;
+
+  /// True when a preview/learn narration is waiting to be played.
+  bool get isInterrupting => _interruptNarration != null;
 
   /// The configured nearby search radius in miles.
   int get nearbyRadiusMiles => _nearbyRadiusMiles;
@@ -216,6 +230,39 @@ class TripService extends ChangeNotifier {
   /// Reload user preferences (call from Settings when min breathe time changes).
   Future<void> refreshPreferences() async {
     await _loadUserPreferences();
+  }
+
+  /// Fetch the preview story for a nearby POI and set it as the interrupt narration.
+  /// Throws if no preview is available or audio hasn't been generated yet.
+  Future<void> learnPoi(NearbyPoi poi) async {
+    final headers = <String, String>{'Content-Type': 'application/json'};
+    final token = await AuthService.getIdToken();
+    if (token != null) headers['Authorization'] = 'Bearer $token';
+    final response = await http.post(
+      Uri.parse('$_backendBase/locations/${poi.id}/preview'),
+      headers: headers,
+    ).timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200) {
+      throw Exception('No preview available');
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    _interruptNarration = PendingNarration(
+      narrationId: data['story_id'] as String,
+      locationName: data['location_name'] as String,
+      narrator: data['narrator_name'] as String,
+      audioBase64: data['audio_base64'] as String,
+      guidePhotoUrl: data['narrator_photo_url'] as String?,
+      locationId: poi.id,
+      storyTitle: data['title'] as String?,
+      contentType: 'preview',
+    );
+    notifyListeners();
+  }
+
+  /// Clear the current interrupt narration and notify listeners.
+  void clearInterrupt() {
+    _interruptNarration = null;
+    notifyListeners();
   }
 
   /// Optimistically toggle saved state and persist to backend.
@@ -668,6 +715,7 @@ class TripService extends ChangeNotifier {
     _breatheTimer?.cancel();
     _breatheTimer = null;
     _nearbyPois = [];
+    _interruptNarration = null;
   }
 
   // ── Clear play history ──────────────────────────────────────────────────────

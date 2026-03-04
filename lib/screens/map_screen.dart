@@ -64,6 +64,12 @@ class _MapScreenState extends State<MapScreen> {
   bool _nearbyVisible = false;
   final ScrollController _nearbyScrollController = ScrollController();
 
+  // Learn / preview interrupt
+  final AudioService _previewAudioService = AudioService();
+  bool _learnCardVisible = false;
+  bool _learnPlaying = false;
+  String? _loadingLearnPoiId;
+
   // Version
   String _version = '';
 
@@ -94,6 +100,7 @@ class _MapScreenState extends State<MapScreen> {
     _tripService.dispose();
     _positionSub?.cancel();
     _audioService.dispose();
+    _previewAudioService.dispose();
     _nearbyScrollController.dispose();
     _countdownTimer?.cancel();
     _upNextTimer?.cancel();
@@ -216,8 +223,43 @@ class _MapScreenState extends State<MapScreen> {
       if (mounted) setState(() {});
       return;
     }
+    if (_tripService.isInterrupting && !_learnPlaying) {
+      _startLearnPlayback();
+      return;
+    }
     if (_tripService.pendingNarration != null && !_playingNarration) {
       _playNarration();
+    }
+  }
+
+  Future<void> _startLearnPlayback() async {
+    _learnPlaying = true;
+    // Pause the main narration if currently playing
+    final wasPlayingAndNotPaused = _playingNarration && !_narrationPaused;
+    if (wasPlayingAndNotPaused) {
+      await _audioService.pause();
+      if (mounted) setState(() => _narrationPaused = true);
+    }
+    if (mounted) setState(() {
+      _narrationVisible = false;
+      _learnCardVisible = true;
+    });
+    final narration = _tripService.interruptNarration;
+    if (narration != null) {
+      await _previewAudioService.playBase64(narration.audioBase64);
+    }
+    _tripService.clearInterrupt();
+    if (mounted) setState(() => _learnCardVisible = false);
+    _learnPlaying = false;
+    // Resume main narration if it was paused for this interrupt
+    if (wasPlayingAndNotPaused && _playingNarration) {
+      if (mounted) {
+        setState(() {
+          _narrationPaused = false;
+          _narrationVisible = true;
+        });
+      }
+      await _audioService.resume();
     }
   }
 
@@ -436,6 +478,7 @@ class _MapScreenState extends State<MapScreen> {
             _buildTripControls(),
             _buildVersionLabel(),
             _buildNearbyCard(),
+            _buildLearnCard(),
             _buildPills(),
           ],
         ),
@@ -1127,12 +1170,31 @@ class _MapScreenState extends State<MapScreen> {
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          // Learn — grayed out (stub)
+                          // Learn — enabled when preview story exists
                           SizedBox(
                             height: 28,
                             child: OutlinedButton.icon(
-                              onPressed: null,
-                              icon: const Icon(Icons.play_circle_outline, size: 14),
+                              onPressed: (poi.hasPreview && !_learnPlaying)
+                                  ? () async {
+                                      setState(() => _loadingLearnPoiId = poi.id);
+                                      try {
+                                        await _tripService.learnPoi(poi);
+                                      } catch (_) {
+                                        if (mounted) {
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            const SnackBar(content: Text('No preview available')),
+                                          );
+                                        }
+                                      } finally {
+                                        if (mounted) setState(() => _loadingLearnPoiId = null);
+                                      }
+                                    }
+                                  : null,
+                              icon: _loadingLearnPoiId == poi.id
+                                  ? const SizedBox(
+                                      width: 14, height: 14,
+                                      child: CircularProgressIndicator(strokeWidth: 2))
+                                  : const Icon(Icons.play_circle_outline, size: 14),
                               label: const Text('Learn', style: TextStyle(fontSize: 11)),
                               style: OutlinedButton.styleFrom(
                                 padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -1192,6 +1254,90 @@ class _MapScreenState extends State<MapScreen> {
                     );
                   },
                 ),
+        ),
+      ),
+    );
+  }
+
+  // ── Learn / preview card ───────────────────────────────────────────────────
+
+  Widget _buildLearnCard() {
+    if (!_learnCardVisible) return const SizedBox.shrink();
+    final narration = _tripService.interruptNarration;
+    final amber = Colors.amber.shade700;
+    return AnimatedPositioned(
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeOutCubic,
+      bottom: _learnCardVisible ? 120 : -400,
+      left: 16,
+      right: 16,
+      child: Card(
+        elevation: 8,
+        margin: EdgeInsets.zero,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  // Guide avatar
+                  _buildGuideAvatar(narration),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.amber.shade100,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text('PREVIEW',
+                                  style: TextStyle(
+                                      fontSize: 9,
+                                      fontWeight: FontWeight.bold,
+                                      color: amber,
+                                      letterSpacing: 0.8)),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                narration?.storyTitle ?? narration?.locationName ?? '',
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                        if ((narration?.locationName ?? '').isNotEmpty)
+                          Text(narration!.locationName,
+                              style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      ],
+                    ),
+                  ),
+                  // Dismiss button
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    color: Colors.grey,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    onPressed: () async {
+                      await _previewAudioService.stop();
+                      _tripService.clearInterrupt();
+                    },
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
