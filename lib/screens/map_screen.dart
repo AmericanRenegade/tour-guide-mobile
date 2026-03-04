@@ -234,13 +234,13 @@ class _MapScreenState extends State<MapScreen> {
 
   Future<void> _startLearnPlayback() async {
     _learnPlaying = true;
-    // Pause the main narration if currently playing
-    final wasPlayingAndNotPaused = _playingNarration && !_narrationPaused;
-    if (wasPlayingAndNotPaused) {
-      await _audioService.pause();
-      if (mounted) setState(() => _narrationPaused = true);
-    }
+    // Stop the main narration — works whether audio has started or not.
+    // The _cancelled flag in AudioService prevents play() from firing if we
+    // stopped it mid-setup (the race condition fix).
+    final wasNarrating = _playingNarration;
+    await _audioService.stop();
     if (mounted) setState(() {
+      _narrationPaused = false;
       _narrationVisible = false;
       _learnCardVisible = true;
     });
@@ -251,15 +251,14 @@ class _MapScreenState extends State<MapScreen> {
     _tripService.clearInterrupt();
     if (mounted) setState(() => _learnCardVisible = false);
     _learnPlaying = false;
-    // Resume main narration if it was paused for this interrupt
-    if (wasPlayingAndNotPaused && _playingNarration) {
-      if (mounted) {
-        setState(() {
-          _narrationPaused = false;
-          _narrationVisible = true;
-        });
+    // Restart the narration that was interrupted (it's still at the front of
+    // the queue since we never called advanceQueue).
+    if (wasNarrating) {
+      _playingNarration = false;
+      if (mounted && _tripService.pendingNarration != null &&
+          _tripService.tripState != TripState.idle) {
+        _playNarration();
       }
-      await _audioService.resume();
     }
   }
 
@@ -288,6 +287,10 @@ class _MapScreenState extends State<MapScreen> {
       // Normal story / trivia question / trivia answer — play audio
       await _audioService.playBase64(narration.audioBase64);
     }
+
+    // If a preview interrupt fired while we were playing (or setting up audio),
+    // bail out — _startLearnPlayback() will restart us after the preview ends.
+    if (_learnPlaying) return;
 
     // If trip ended while we were playing, _onTripChanged already cleaned up
     if (_tripService.tripState == TripState.idle) return;

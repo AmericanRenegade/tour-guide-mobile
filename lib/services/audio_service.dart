@@ -8,6 +8,10 @@ import 'package:path_provider/path_provider.dart';
 class AudioService {
   final AudioPlayer _player = AudioPlayer();
 
+  // Set to true by stop() so playBase64() won't call play() after being stopped
+  // mid-setup (prevents the race where audio starts after an interrupt).
+  bool _cancelled = false;
+
   bool get isPlaying => _player.playing;
 
   /// Stream of current playback position (for narration text sync).
@@ -19,12 +23,15 @@ class AudioService {
   /// Decode a base64-encoded MP3, write it to a temp file, play it,
   /// and return a Future that completes when playback finishes.
   Future<void> playBase64(String base64Audio) async {
+    _cancelled = false;
     try {
       final bytes = base64Decode(base64Audio);
       final tempDir = await getTemporaryDirectory();
       final tempFile = File('${tempDir.path}/narration.mp3');
       await tempFile.writeAsBytes(bytes);
       await _player.setFilePath(tempFile.path);
+      // Guard: stop() may have been called while we were setting up the file.
+      if (_cancelled) return;
       await _player.play();
       // Wait until playback completes or is stopped.
       await _player.playerStateStream.firstWhere((s) =>
@@ -39,7 +46,10 @@ class AudioService {
 
   Future<void> resume() => _player.play();
 
-  Future<void> stop() => _player.stop();
+  Future<void> stop() {
+    _cancelled = true;
+    return _player.stop();
+  }
 
   bool _muted = false;
   bool get isMuted => _muted;
