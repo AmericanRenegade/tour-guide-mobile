@@ -10,6 +10,37 @@ import '../auth_service.dart';
 
 enum TripState { idle, active, paused }
 
+/// A nearby point of interest returned by the ping endpoint.
+class NearbyPoi {
+  final String id;
+  final String name;
+  final double lat;
+  final double lng;
+  final String? locationType;
+  final double distanceMiles;
+  bool isSaved;
+
+  NearbyPoi({
+    required this.id,
+    required this.name,
+    required this.lat,
+    required this.lng,
+    this.locationType,
+    required this.distanceMiles,
+    this.isSaved = false,
+  });
+
+  factory NearbyPoi.fromJson(Map<String, dynamic> j) => NearbyPoi(
+        id: j['id'] as String,
+        name: j['name'] as String,
+        lat: (j['lat'] as num).toDouble(),
+        lng: (j['lng'] as num).toDouble(),
+        locationType: j['location_type'] as String?,
+        distanceMiles: (j['distance_miles'] as num).toDouble(),
+        isSaved: j['is_saved'] as bool? ?? false,
+      );
+}
+
 /// Represents a narration pulled from the server queue.
 class PendingNarration {
   final String narrationId;
@@ -110,6 +141,12 @@ class TripService extends ChangeNotifier {
   double _defaultBreatheS = 3;
   double _userMinBreatheS = 0;
   int _exploreCooldownDays = 15;
+  int _nearbyRadiusMiles = 10;
+
+  // ── Nearby POIs ──────────────────────────────────────────────────────────
+  List<NearbyPoi> _nearbyPois = [];
+  List<NearbyPoi> _pendingNearbyPois = [];
+  bool _nearbyPoisDirty = false;
   DateTime? _lastPlaybackEndedAt;
   Timer? _breatheTimer;
 
@@ -142,6 +179,15 @@ class TripService extends ChangeNotifier {
   /// Number of narrations remaining in the local pool.
   int get narrationQueueLength => _narrationPool.length;
 
+  /// Nearby POIs from the last committed ping response.
+  List<NearbyPoi> get nearbyPois => _nearbyPois;
+
+  /// True when a new nearby POI list is waiting to be committed.
+  bool get nearbyPoisDirty => _nearbyPoisDirty;
+
+  /// The configured nearby search radius in miles.
+  int get nearbyRadiusMiles => _nearbyRadiusMiles;
+
   /// Total narrations in the current batch (for "X of Y" display).
   int get totalNarrationsInBatch => _totalNarrationsInBatch;
 
@@ -167,6 +213,7 @@ class TripService extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     _userMinBreatheS = (prefs.getInt('min_breathe_s') ?? 0).toDouble();
     _exploreCooldownDays = prefs.getInt('explore_cooldown_days') ?? 15;
+    _nearbyRadiusMiles = prefs.getInt('nearby_radius_miles') ?? 10;
   }
 
   Future<void> reloadUserPreferences() async => _loadUserPreferences();
@@ -174,6 +221,50 @@ class TripService extends ChangeNotifier {
   /// Reload user preferences (call from Settings when min breathe time changes).
   Future<void> refreshPreferences() async {
     await _loadUserPreferences();
+  }
+
+  /// Apply the pending nearby POI list (called by MapScreen when scroll is idle).
+  void commitNearbyPois() {
+    if (!_nearbyPoisDirty) return;
+    _nearbyPois = List.unmodifiable(_pendingNearbyPois);
+    _pendingNearbyPois = [];
+    _nearbyPoisDirty = false;
+    notifyListeners();
+  }
+
+  /// Optimistically toggle saved state and persist to backend.
+  Future<void> toggleSavePoi(String locationId) async {
+    final idx = _nearbyPois.indexWhere((p) => p.id == locationId);
+    if (idx == -1) return;
+    final poi = _nearbyPois[idx];
+    poi.isSaved = !poi.isSaved;
+    notifyListeners();
+
+    final token = await AuthService.getIdToken();
+    if (token == null) return;
+    final headers = {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer $token',
+    };
+    try {
+      if (poi.isSaved) {
+        await http.post(
+          Uri.parse('$_backendBase/pois/save'),
+          headers: headers,
+          body: jsonEncode({'location_id': locationId}),
+        ).timeout(const Duration(seconds: 10));
+      } else {
+        await http.delete(
+          Uri.parse('$_backendBase/pois/save/$locationId'),
+          headers: headers,
+        ).timeout(const Duration(seconds: 10));
+      }
+    } catch (e) {
+      // Revert optimistic update on failure
+      poi.isSaved = !poi.isSaved;
+      notifyListeners();
+      debugPrint('TripService toggleSavePoi error: $e');
+    }
   }
 
   // ── Trip lifecycle ──────────────────────────────────────────────────────────
@@ -257,6 +348,7 @@ class TripService extends ChangeNotifier {
           'longitude': position.longitude,
           'force_new_session': forceNewSession,
           'explore_cooldown_days': _exploreCooldownDays,
+          'nearby_radius_miles': _nearbyRadiusMiles,
         }),
       ).timeout(const Duration(seconds: 15));
 
@@ -266,11 +358,17 @@ class TripService extends ChangeNotifier {
         final sid = data['session_id'] as String?;
         if (sid != null && _tripId == null) { _tripId = sid; }
 
-        final queuedCount = (data['queued_count'] as num?)?.toInt() ?? 0;
         final pendingCount = (data['pending_count'] as num?)?.toInt() ?? 0;
-        debugPrint('PING queued=$queuedCount pending=$pendingCount tripId=$_tripId poolSize=${_narrationPool.length}');
         if (pendingCount > 0 && _tripId != null) {
           _drainServerQueue();
+        }
+
+        final rawPois = data['nearby_pois'] as List?;
+        if (rawPois != null) {
+          _pendingNearbyPois = rawPois
+              .map((e) => NearbyPoi.fromJson(e as Map<String, dynamic>))
+              .toList();
+          _nearbyPoisDirty = true;
         }
       }
 
@@ -584,6 +682,9 @@ class TripService extends ChangeNotifier {
     _lastPlaybackEndedAt = null;
     _breatheTimer?.cancel();
     _breatheTimer = null;
+    _nearbyPois = [];
+    _pendingNearbyPois = [];
+    _nearbyPoisDirty = false;
   }
 
   // ── Clear play history ──────────────────────────────────────────────────────

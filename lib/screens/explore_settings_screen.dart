@@ -28,6 +28,7 @@ class _ExploreSettingsScreenState extends State<ExploreSettingsScreen> {
 
   int _cooldownDays = 15;
   int _minBreatheS = 0;
+  int _nearbyRadiusMiles = 10;
   bool _clearingHistory = false;
   bool _loading = true;
 
@@ -42,6 +43,7 @@ class _ExploreSettingsScreenState extends State<ExploreSettingsScreen> {
     setState(() {
       _cooldownDays = prefs.getInt('explore_cooldown_days') ?? 15;
       _minBreatheS = prefs.getInt('min_breathe_s') ?? 0;
+      _nearbyRadiusMiles = prefs.getInt('nearby_radius_miles') ?? 10;
       _loading = false;
     });
   }
@@ -57,6 +59,12 @@ class _ExploreSettingsScreenState extends State<ExploreSettingsScreen> {
     setState(() => _minBreatheS = seconds);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('min_breathe_s', seconds);
+  }
+
+  Future<void> _setNearbyRadius(int miles) async {
+    setState(() => _nearbyRadiusMiles = miles);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('nearby_radius_miles', miles);
   }
 
   Future<void> _clearListenedHistory() async {
@@ -208,6 +216,46 @@ class _ExploreSettingsScreenState extends State<ExploreSettingsScreen> {
                   child: Text(
                     'Minimum wait between story narrations. '
                     'Set to 0 to use the server default.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ),
+                const Divider(height: 32),
+
+                // ── Nearby POI Radius ──
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Text(
+                    'Nearby POI Radius',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.grey,
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+                  child: Text(
+                    '$_nearbyRadiusMiles ${_nearbyRadiusMiles == 1 ? "mile" : "miles"}',
+                    style: const TextStyle(fontSize: 16, color: _teal),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                  child: Slider(
+                    value: _nearbyRadiusMiles.toDouble(),
+                    min: 1,
+                    max: 100,
+                    divisions: 99,
+                    activeColor: _teal,
+                    label: '$_nearbyRadiusMiles mi',
+                    onChanged: (v) => _setNearbyRadius(v.toInt()),
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Text(
+                    'Distance within which POIs appear in the Nearby list. Max 100 miles.',
                     style: TextStyle(fontSize: 12, color: Colors.grey),
                   ),
                 ),

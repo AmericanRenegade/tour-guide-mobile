@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../models/active_location.dart';
 import '../services/trip_service.dart';
 import '../services/audio_service.dart';
@@ -14,38 +15,6 @@ import '../auth_service.dart';
 import '../models/tour.dart';
 import 'settings_screen.dart';
 import 'tours_screen.dart';
-
-// ── Search result model ─────────────────────────────────────────────────────
-
-class SearchResult {
-  final String id;
-  final String name;
-  final double lat;
-  final double lng;
-  final String? county;
-  final String? stateCode;
-  final double? distanceMiles;
-
-  const SearchResult({
-    required this.id,
-    required this.name,
-    required this.lat,
-    required this.lng,
-    this.county,
-    this.stateCode,
-    this.distanceMiles,
-  });
-
-  factory SearchResult.fromJson(Map<String, dynamic> j) => SearchResult(
-        id: j['id'] as String,
-        name: j['name'] as String,
-        lat: (j['lat'] as num).toDouble(),
-        lng: (j['lng'] as num).toDouble(),
-        county: j['county'] as String?,
-        stateCode: j['state_code'] as String?,
-        distanceMiles: (j['distance_miles'] as num?)?.toDouble(),
-      );
-}
 
 // ── Map screen ──────────────────────────────────────────────────────────────
 
@@ -91,21 +60,9 @@ class _MapScreenState extends State<MapScreen> {
   // Active tour
   Tour? _activeTour;
 
-  // Narration text auto-scroll
-  final ScrollController _narrationScrollController = ScrollController();
-  StreamSubscription<Duration>? _positionStreamSub;
-
-  // Search state
-  bool _searchActive = false;
-  final TextEditingController _searchController = TextEditingController();
-  final FocusNode _searchFocus = FocusNode();
-  List<SearchResult> _searchResults = [];
-  Timer? _searchDebounce;
-  bool _searchLoading = false;
-  // Search filters
-  double? _searchRadiusMiles;
-  String _searchState = '';
-  String _searchCounty = '';
+  // Nearby POIs card
+  bool _nearbyVisible = false;
+  final ScrollController _nearbyScrollController = ScrollController();
 
   // Version
   String _version = '';
@@ -136,12 +93,8 @@ class _MapScreenState extends State<MapScreen> {
     _tripService.removeListener(_onTripChanged);
     _tripService.dispose();
     _positionSub?.cancel();
-    _positionStreamSub?.cancel();
     _audioService.dispose();
-    _narrationScrollController.dispose();
-    _searchController.dispose();
-    _searchFocus.dispose();
-    _searchDebounce?.cancel();
+    _nearbyScrollController.dispose();
     _countdownTimer?.cancel();
     _upNextTimer?.cancel();
     super.dispose();
@@ -252,8 +205,6 @@ class _MapScreenState extends State<MapScreen> {
       if (_upNextSeconds > 0) _cancelUpNext();
       if (_playingNarration) {
         _audioService.stop();
-        _positionStreamSub?.cancel();
-        _positionStreamSub = null;
         _playingNarration = false;
         _skippingNarration = false;
       }
@@ -293,14 +244,7 @@ class _MapScreenState extends State<MapScreen> {
       await _handleTriviaInterstitial(narration);
     } else {
       // Normal story / trivia question / trivia answer — play audio
-      _positionStreamSub?.cancel();
-      _positionStreamSub =
-          _audioService.positionStream.listen(_onAudioPositionChanged);
-
       await _audioService.playBase64(narration.audioBase64);
-
-      _positionStreamSub?.cancel();
-      _positionStreamSub = null;
     }
 
     // If trip ended while we were playing, _onTripChanged already cleaned up
@@ -313,10 +257,6 @@ class _MapScreenState extends State<MapScreen> {
 
     // If more narrations in queue and ready immediately, play next
     if (_tripService.pendingNarration != null) {
-      // Reset scroll for the next narration
-      if (_narrationScrollController.hasClients) {
-        _narrationScrollController.jumpTo(0);
-      }
       // Reset slide position so new card appears
       if (mounted) {
         setState(() {
@@ -472,130 +412,6 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  void _onAudioPositionChanged(Duration position) {
-    final total = _audioService.duration;
-    if (total == null || total.inMilliseconds == 0) return;
-    if (!_narrationScrollController.hasClients) return;
-    final maxScroll = _narrationScrollController.position.maxScrollExtent;
-    if (maxScroll <= 0) return; // text fits without scrolling
-
-    // Delay scroll start by 3 seconds, finish 3 seconds before end.
-    // This gives the user time to read the opening text and ensures
-    // the final lines are visible for a few seconds before the card fades.
-    const startDelayMs = 3000;
-    const endBufferMs = 3000;
-    final totalMs = total.inMilliseconds;
-    final posMs = position.inMilliseconds;
-    final scrollWindowMs = totalMs - startDelayMs - endBufferMs;
-    if (scrollWindowMs <= 0) return; // audio too short to scroll
-
-    final scrollProgress =
-        ((posMs - startDelayMs) / scrollWindowMs).clamp(0.0, 1.0);
-    _narrationScrollController
-        .jumpTo((scrollProgress * maxScroll).clamp(0.0, maxScroll));
-  }
-
-  // ── Search ─────────────────────────────────────────────────────────────────
-
-  void _onSearchChanged(String query) {
-    _searchDebounce?.cancel();
-    if (query.trim().isEmpty) {
-      setState(() {
-        _searchResults = [];
-        _searchLoading = false;
-      });
-      return;
-    }
-    setState(() => _searchLoading = true);
-    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
-      _doSearch(query.trim());
-    });
-  }
-
-  Future<void> _doSearch(String query) async {
-    try {
-      final params = <String, String>{
-        'q': query,
-        'limit': '20',
-      };
-      if (_userPosition != null) {
-        params['lat'] = _userPosition!.latitude.toString();
-        params['lng'] = _userPosition!.longitude.toString();
-      }
-      if (_searchRadiusMiles != null) {
-        params['radius_miles'] = _searchRadiusMiles.toString();
-      }
-      if (_searchState.isNotEmpty) {
-        params['state'] = _searchState;
-      }
-      if (_searchCounty.isNotEmpty) {
-        params['county'] = _searchCounty;
-      }
-      final uri =
-          Uri.parse('$_backendBase/search').replace(queryParameters: params);
-      final response =
-          await http.get(uri).timeout(const Duration(seconds: 10));
-      if (response.statusCode == 200 && mounted) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        final results = (data['results'] as List)
-            .map((j) => SearchResult.fromJson(j as Map<String, dynamic>))
-            .toList();
-        setState(() {
-          _searchResults = results;
-          _searchLoading = false;
-        });
-      }
-    } catch (e) {
-      debugPrint('Search error: $e');
-      if (mounted) setState(() => _searchLoading = false);
-    }
-  }
-
-  void _selectSearchResult(SearchResult result) {
-    setState(() {
-      _searchActive = false;
-      _searchResults = [];
-      _searchController.clear();
-    });
-    _searchFocus.unfocus();
-    _mapController.move(LatLng(result.lat, result.lng), 15);
-  }
-
-  void _dismissSearch() {
-    setState(() {
-      _searchActive = false;
-      _searchResults = [];
-      _searchController.clear();
-    });
-    _searchFocus.unfocus();
-  }
-
-  void _showSearchOptions() {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => _SearchOptionsSheet(
-        radiusMiles: _searchRadiusMiles,
-        state: _searchState,
-        county: _searchCounty,
-        onApply: (radius, state, county) {
-          setState(() {
-            _searchRadiusMiles = radius;
-            _searchState = state;
-            _searchCounty = county;
-          });
-          Navigator.pop(ctx);
-          // Re-run search with new filters
-          if (_searchController.text.trim().isNotEmpty) {
-            _onSearchChanged(_searchController.text);
-          }
-        },
-      ),
-    );
-  }
-
   // ── Center on user ─────────────────────────────────────────────────────────
 
   void _centerOnUser() {
@@ -619,9 +435,8 @@ class _MapScreenState extends State<MapScreen> {
             _buildCenterButton(),
             _buildTripControls(),
             _buildVersionLabel(),
-            _buildSearchBar(),
-            if (!_searchActive) _buildPills(),
-            if (_searchActive) _buildSearchResults(),
+            _buildNearbyCard(),
+            _buildPills(),
           ],
         ),
       ),
@@ -813,9 +628,11 @@ class _MapScreenState extends State<MapScreen> {
 
   Widget _buildNarrationCard() {
     final narration = _tripService.pendingNarration;
+    final nearbyExtra = _nearbyVisible ? 236.0 : 0.0; // card 220 + spacing 16
     final maxCardHeight = MediaQuery.of(context).size.height
-        - MediaQuery.of(context).padding.top - 68 - 48 // below pills
-        - 120; // above trip controls
+        - MediaQuery.of(context).padding.top - 8 - 40 - 8 // pills row
+        - nearbyExtra
+        - 48 - 120; // breathing room + trip controls
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 350),
       curve: Curves.easeOutCubic,
@@ -920,36 +737,6 @@ class _MapScreenState extends State<MapScreen> {
                           foregroundColor: Colors.white,
                           elevation: 0,
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-                        ),
-                      ),
-                    ),
-                  ],
-                  // Narration text (scrolling) — for stories & trivia Q/A
-                  if ((narration?.narrationText ?? '').isNotEmpty &&
-                      !(narration?.isTriviaInterstitial ?? false)) ...[
-                    const SizedBox(height: 10),
-                    const Divider(height: 1),
-                    const SizedBox(height: 8),
-                    Flexible(
-                      child: ShaderMask(
-                        shaderCallback: (bounds) => const LinearGradient(
-                          begin: Alignment.topCenter,
-                          end: Alignment.bottomCenter,
-                          colors: [Colors.white, Colors.white, Colors.transparent],
-                          stops: [0.0, 0.85, 1.0],
-                        ).createShader(bounds),
-                        blendMode: BlendMode.dstIn,
-                        child: SingleChildScrollView(
-                          controller: _narrationScrollController,
-                          physics: const ClampingScrollPhysics(),
-                          child: Text(
-                            narration!.narrationText,
-                            style: const TextStyle(
-                              fontSize: 15,
-                              height: 1.5,
-                              color: Color(0xFF444444),
-                            ),
-                          ),
                         ),
                       ),
                     ),
@@ -1284,163 +1071,144 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // ── Search bar ─────────────────────────────────────────────────────────────
+  // ── Nearby POIs card ───────────────────────────────────────────────────────
 
-  Widget _buildSearchBar() {
-    final top = MediaQuery.of(context).padding.top + 8;
-    return Positioned(
-      top: top,
-      left: 16,
-      right: 16,
-      child: Material(
-        elevation: 4,
-        borderRadius: BorderRadius.circular(16),
-        color: Colors.white,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(16),
-          onTap: _searchActive
-              ? null
-              : () => setState(() {
-                    _searchActive = true;
-                    // Focus after frame builds
-                    WidgetsBinding.instance
-                        .addPostFrameCallback((_) => _searchFocus.requestFocus());
-                  }),
-          child: SizedBox(
-            height: 48,
-            child: Row(
-              children: [
-                const SizedBox(width: 14),
-                const Icon(Icons.search, color: Colors.grey, size: 22),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _searchActive
-                      ? TextField(
-                          controller: _searchController,
-                          focusNode: _searchFocus,
-                          onChanged: _onSearchChanged,
-                          decoration: const InputDecoration(
-                            hintText: 'Search tours and places',
-                            hintStyle: TextStyle(color: Colors.grey, fontSize: 15),
-                            border: InputBorder.none,
-                            contentPadding: EdgeInsets.zero,
-                            isDense: true,
-                          ),
-                          style: const TextStyle(fontSize: 15),
-                        )
-                      : const Text(
-                          'Search tours and places',
-                          style: TextStyle(color: Colors.grey, fontSize: 15),
-                        ),
-                ),
-                if (_searchActive && _searchController.text.isNotEmpty)
-                  IconButton(
-                    icon: const Icon(Icons.close, size: 20, color: Colors.grey),
-                    onPressed: () {
-                      _searchController.clear();
-                      _onSearchChanged('');
-                    },
-                  ),
-                IconButton(
-                  icon: Icon(
-                    Icons.tune,
-                    size: 20,
-                    color: (_searchRadiusMiles != null ||
-                            _searchState.isNotEmpty ||
-                            _searchCounty.isNotEmpty)
-                        ? _teal
-                        : Colors.grey,
-                  ),
-                  onPressed: _showSearchOptions,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
+  IconData _iconForPoiType(String? type) {
+    switch (type?.toLowerCase()) {
+      case 'city': return Icons.location_city;
+      case 'town': return Icons.home_work;
+      case 'neighborhood': return Icons.map;
+      default: return Icons.place;
+    }
   }
 
-  Widget _buildSearchResults() {
-    final top = MediaQuery.of(context).padding.top + 68;
+  Widget _buildNearbyCard() {
+    if (!_nearbyVisible) return const SizedBox.shrink();
+    final top = MediaQuery.of(context).padding.top + 8 + 40 + 8;
+    final pois = _tripService.nearbyPois;
+    final radius = _tripService.nearbyRadiusMiles;
+
+    // Commit pending update when scroll is idle
+    _nearbyScrollController.addListener(() {
+      if (!_nearbyScrollController.position.isScrollingNotifier.value &&
+          _tripService.nearbyPoisDirty) {
+        _tripService.commitNearbyPois();
+      }
+    });
+
     return Positioned(
       top: top,
-      left: 16,
-      right: 16,
-      bottom: 0,
-      child: GestureDetector(
-        onTap: _dismissSearch,
-        behavior: HitTestBehavior.opaque,
-        child: Align(
-          alignment: Alignment.topCenter,
-          child: Material(
-            elevation: 4,
-            borderRadius: BorderRadius.circular(12),
-            color: Colors.white,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 320),
-              child: _searchLoading
-                  ? const Padding(
-                      padding: EdgeInsets.all(16),
-                      child: Center(
-                          child: SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: CircularProgressIndicator(strokeWidth: 2))),
-                    )
-                  : _searchResults.isEmpty &&
-                          _searchController.text.isNotEmpty
-                      ? const Padding(
-                          padding: EdgeInsets.all(16),
-                          child: Text('No results found',
-                              style: TextStyle(color: Colors.grey)),
-                        )
-                      : _searchResults.isEmpty
-                          ? const SizedBox.shrink()
-                          : ListView.separated(
-                              shrinkWrap: true,
-                              padding: const EdgeInsets.symmetric(vertical: 4),
-                              itemCount: _searchResults.length,
-                              separatorBuilder: (_, __) =>
-                                  const Divider(height: 1, indent: 16),
-                              itemBuilder: (_, i) {
-                                final r = _searchResults[i];
-                                final subtitle = [
-                                  if (r.county != null) r.county,
-                                  if (r.stateCode != null) r.stateCode,
-                                ].join(', ');
-                                return ListTile(
-                                  dense: true,
-                                  title: Text(r.name,
-                                      style: const TextStyle(fontSize: 14)),
-                                  subtitle: subtitle.isNotEmpty
-                                      ? Text(subtitle,
-                                          style: const TextStyle(
-                                              fontSize: 12,
-                                              color: Colors.grey))
-                                      : null,
-                                  trailing: r.distanceMiles != null
-                                      ? Text(
-                                          '${r.distanceMiles!.toStringAsFixed(1)} mi',
-                                          style: const TextStyle(
-                                              fontSize: 12, color: _teal),
-                                        )
-                                      : null,
-                                  onTap: () => _selectSearchResult(r),
-                                );
-                              },
+      left: 12,
+      right: 12,
+      child: Card(
+        elevation: 6,
+        margin: EdgeInsets.zero,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 220),
+          child: pois.isEmpty
+              ? Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(
+                    'Nothing within $radius ${radius == 1 ? "mile" : "miles"}.\nExpand your distance limit in Settings → Explore Settings.',
+                    style: const TextStyle(color: Colors.grey, fontSize: 13),
+                  ),
+                )
+              : ListView.separated(
+                  controller: _nearbyScrollController,
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  itemCount: pois.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1, indent: 56),
+                  itemBuilder: (_, i) {
+                    final poi = pois[i];
+                    return ListTile(
+                      dense: true,
+                      leading: Icon(_iconForPoiType(poi.locationType),
+                          color: _teal, size: 20),
+                      title: Text(poi.name,
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis),
+                      subtitle: Text('${poi.distanceMiles} mi',
+                          style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // Learn — grayed out (stub)
+                          SizedBox(
+                            height: 28,
+                            child: OutlinedButton.icon(
+                              onPressed: null,
+                              icon: const Icon(Icons.play_circle_outline, size: 14),
+                              label: const Text('Learn', style: TextStyle(fontSize: 11)),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                                minimumSize: Size.zero,
+                              ),
                             ),
-            ),
-          ),
+                          ),
+                          const SizedBox(width: 4),
+                          // Save
+                          SizedBox(
+                            height: 28,
+                            child: OutlinedButton.icon(
+                              onPressed: () => _tripService.toggleSavePoi(poi.id),
+                              icon: Icon(
+                                poi.isSaved ? Icons.bookmark : Icons.bookmark_border,
+                                size: 14,
+                                color: poi.isSaved ? _teal : null,
+                              ),
+                              label: Text(poi.isSaved ? 'Saved' : 'Save',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: poi.isSaved ? _teal : null,
+                                  )),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                                minimumSize: Size.zero,
+                                side: poi.isSaved
+                                    ? const BorderSide(color: _teal)
+                                    : null,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          // Go
+                          SizedBox(
+                            height: 28,
+                            child: OutlinedButton.icon(
+                              onPressed: () async {
+                                final name = Uri.encodeComponent(poi.name);
+                                final uri = Uri.parse(
+                                    'geo:${poi.lat},${poi.lng}?q=${poi.lat},${poi.lng}($name)');
+                                if (await canLaunchUrl(uri)) {
+                                  await launchUrl(uri,
+                                      mode: LaunchMode.externalApplication);
+                                }
+                              },
+                              icon: const Icon(Icons.directions, size: 14),
+                              label: const Text('Go', style: TextStyle(fontSize: 11)),
+                              style: OutlinedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                                minimumSize: Size.zero,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
         ),
       ),
     );
   }
 
-  // ── Pills row (Tours + Settings) ──────────────────────────────────────────
+  // ── Pills row ──────────────────────────────────────────────────────────────
 
   Widget _buildPills() {
-    final top = MediaQuery.of(context).padding.top + 68;
+    final top = MediaQuery.of(context).padding.top + 8;
     return Positioned(
       top: top,
       left: 16,
@@ -1448,8 +1216,39 @@ class _MapScreenState extends State<MapScreen> {
         children: [
           _buildToursPill(),
           const SizedBox(width: 8),
+          _buildNearbyPill(),
+          const SizedBox(width: 8),
           _buildSettingsPill(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildNearbyPill() {
+    final color = _nearbyVisible ? _teal : Colors.grey;
+    return Material(
+      elevation: 2,
+      borderRadius: BorderRadius.circular(16),
+      color: Colors.white,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () {
+          setState(() => _nearbyVisible = !_nearbyVisible);
+          if (_nearbyVisible && _tripService.nearbyPoisDirty) {
+            _tripService.commitNearbyPois();
+          }
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.near_me, size: 16, color: color),
+              const SizedBox(width: 4),
+              Text('Nearby', style: TextStyle(fontSize: 12, color: color)),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1524,135 +1323,6 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-}
-
-// ── Search options bottom sheet ──────────────────────────────────────────────
-
-class _SearchOptionsSheet extends StatefulWidget {
-  final double? radiusMiles;
-  final String state;
-  final String county;
-  final void Function(double? radius, String state, String county) onApply;
-
-  const _SearchOptionsSheet({
-    required this.radiusMiles,
-    required this.state,
-    required this.county,
-    required this.onApply,
-  });
-
-  @override
-  State<_SearchOptionsSheet> createState() => _SearchOptionsSheetState();
-}
-
-class _SearchOptionsSheetState extends State<_SearchOptionsSheet> {
-  late double? _radius;
-  late TextEditingController _stateCtrl;
-  late TextEditingController _countyCtrl;
-
-  static const List<double?> _distanceOptions = [
-    10,
-    25,
-    50,
-    100,
-    null,
-  ];
-  static const List<String> _distanceLabels = [
-    '10 mi',
-    '25 mi',
-    '50 mi',
-    '100 mi',
-    'Any',
-  ];
-
-  @override
-  void initState() {
-    super.initState();
-    _radius = widget.radiusMiles;
-    _stateCtrl = TextEditingController(text: widget.state);
-    _countyCtrl = TextEditingController(text: widget.county);
-  }
-
-  @override
-  void dispose() {
-    _stateCtrl.dispose();
-    _countyCtrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 20,
-        right: 20,
-        top: 20,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('Search Options',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 16),
-          // Distance chips
-          const Text('Distance',
-              style: TextStyle(fontSize: 13, color: Colors.grey)),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            children: List.generate(_distanceOptions.length, (i) {
-              final selected = _radius == _distanceOptions[i];
-              return ChoiceChip(
-                label: Text(_distanceLabels[i]),
-                selected: selected,
-                selectedColor: const Color(0xFF0d9488).withValues(alpha: 0.15),
-                onSelected: (_) => setState(() => _radius = _distanceOptions[i]),
-              );
-            }),
-          ),
-          const SizedBox(height: 16),
-          // State filter
-          TextField(
-            controller: _stateCtrl,
-            decoration: const InputDecoration(
-              labelText: 'State (e.g. VA, MD)',
-              isDense: true,
-              border: OutlineInputBorder(),
-            ),
-            textCapitalization: TextCapitalization.characters,
-          ),
-          const SizedBox(height: 12),
-          // County filter
-          TextField(
-            controller: _countyCtrl,
-            decoration: const InputDecoration(
-              labelText: 'County',
-              isDense: true,
-              border: OutlineInputBorder(),
-            ),
-          ),
-          const SizedBox(height: 20),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: () => widget.onApply(
-                _radius,
-                _stateCtrl.text.trim(),
-                _countyCtrl.text.trim(),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF0d9488),
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('Apply'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 /// Auto-scrolling marquee text: pause → scroll to end → pause → reset → repeat.
