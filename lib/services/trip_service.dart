@@ -323,31 +323,20 @@ class TripService extends ChangeNotifier {
           _defaultBreatheS = (breathe as num).toDouble();
         }
 
-        // Check for narrations array (group-aware response)
         final narrationsList = data['narrations'] as List?;
-        PendingNarration? first;
+        if (narrationsList == null || narrationsList.isEmpty) return null;
 
-        if (narrationsList != null && narrationsList.isNotEmpty) {
-          // Parse all narrations in the group
-          for (final item in narrationsList) {
-            final m = item as Map<String, dynamic>;
-            final narration = _parseNarration(m, data);
-            if (_isDuplicate(narration)) {
-              debugPrint('DEQUEUE skip duplicate: storyId=${narration.storyId} triviaId=${narration.triviaId}');
-              continue;
-            }
-            _narrationPool.add(narration);
-            _markSeen(narration);
-            first ??= narration;
+        PendingNarration? first;
+        for (final item in narrationsList) {
+          final m = item as Map<String, dynamic>;
+          final narration = _parseNarration(m);
+          if (_isDuplicate(narration)) {
+            debugPrint('DEQUEUE skip duplicate: storyId=${narration.storyId} triviaId=${narration.triviaId}');
+            continue;
           }
-        } else {
-          // Fallback: flat fields (backward compat for older servers)
-          final narration = _parseNarration(data, data);
-          if (!_isDuplicate(narration)) {
-            _narrationPool.add(narration);
-            _markSeen(narration);
-            first = narration;
-          }
+          _narrationPool.add(narration);
+          _markSeen(narration);
+          first ??= narration;
         }
 
         _totalNarrationsInBatch = _narrationPool.length + _playedInBatch;
@@ -360,7 +349,7 @@ class TripService extends ChangeNotifier {
     return null;
   }
 
-  PendingNarration _parseNarration(Map<String, dynamic> m, Map<String, dynamic> envelope) {
+  PendingNarration _parseNarration(Map<String, dynamic> m) {
     final guideId = m['guide_id'] as String?;
     return PendingNarration(
       narrationId: m['narration_id'] as String,
@@ -372,11 +361,11 @@ class TripService extends ChangeNotifier {
           ? '$_backendBase/tour-guides/$guideId/photo'
           : null,
       locationId: m['location_id'] as String?,
-      topic: envelope['topic'] as String? ?? m['topic'] as String? ?? 'location',
+      topic: m['topic'] as String? ?? 'location',
       tourId: m['tour_id'] as String?,
       storyTitle: m['story_title'] as String?,
       contentType: m['content_type'] as String? ?? 'story',
-      groupId: envelope['group_id'] as String? ?? m['group_id'] as String?,
+      groupId: m['group_id'] as String?,
       groupSeq: (m['group_seq'] as num?)?.toInt() ?? 0,
       revealDelayS: (m['reveal_delay_s'] as num?)?.toInt(),
       // Pacing fields from enriched dequeue response
