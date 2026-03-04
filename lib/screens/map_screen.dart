@@ -1088,14 +1088,6 @@ class _MapScreenState extends State<MapScreen> {
     final pois = _tripService.nearbyPois;
     final radius = _tripService.nearbyRadiusMiles;
 
-    // Commit pending update when scroll is idle
-    _nearbyScrollController.addListener(() {
-      if (!_nearbyScrollController.position.isScrollingNotifier.value &&
-          _tripService.nearbyPoisDirty) {
-        _tripService.commitNearbyPois();
-      }
-    });
-
     return Positioned(
       top: top,
       left: 12,
@@ -1232,12 +1224,7 @@ class _MapScreenState extends State<MapScreen> {
       color: Colors.white,
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
-        onTap: () {
-          setState(() => _nearbyVisible = !_nearbyVisible);
-          if (_nearbyVisible && _tripService.nearbyPoisDirty) {
-            _tripService.commitNearbyPois();
-          }
-        },
+        onTap: () => setState(() => _nearbyVisible = !_nearbyVisible),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           child: Row(

@@ -145,8 +145,6 @@ class TripService extends ChangeNotifier {
 
   // ── Nearby POIs ──────────────────────────────────────────────────────────
   List<NearbyPoi> _nearbyPois = [];
-  List<NearbyPoi> _pendingNearbyPois = [];
-  bool _nearbyPoisDirty = false;
   DateTime? _lastPlaybackEndedAt;
   Timer? _breatheTimer;
 
@@ -179,11 +177,8 @@ class TripService extends ChangeNotifier {
   /// Number of narrations remaining in the local pool.
   int get narrationQueueLength => _narrationPool.length;
 
-  /// Nearby POIs from the last committed ping response.
+  /// Nearby POIs from the last ping response.
   List<NearbyPoi> get nearbyPois => _nearbyPois;
-
-  /// True when a new nearby POI list is waiting to be committed.
-  bool get nearbyPoisDirty => _nearbyPoisDirty;
 
   /// The configured nearby search radius in miles.
   int get nearbyRadiusMiles => _nearbyRadiusMiles;
@@ -221,15 +216,6 @@ class TripService extends ChangeNotifier {
   /// Reload user preferences (call from Settings when min breathe time changes).
   Future<void> refreshPreferences() async {
     await _loadUserPreferences();
-  }
-
-  /// Apply the pending nearby POI list (called by MapScreen when scroll is idle).
-  void commitNearbyPois() {
-    if (!_nearbyPoisDirty) return;
-    _nearbyPois = List.unmodifiable(_pendingNearbyPois);
-    _pendingNearbyPois = [];
-    _nearbyPoisDirty = false;
-    notifyListeners();
   }
 
   /// Optimistically toggle saved state and persist to backend.
@@ -365,10 +351,9 @@ class TripService extends ChangeNotifier {
 
         final rawPois = data['nearby_pois'] as List?;
         if (rawPois != null) {
-          _pendingNearbyPois = rawPois
+          _nearbyPois = rawPois
               .map((e) => NearbyPoi.fromJson(e as Map<String, dynamic>))
               .toList();
-          _nearbyPoisDirty = true;
         }
       }
 
@@ -683,8 +668,6 @@ class TripService extends ChangeNotifier {
     _breatheTimer?.cancel();
     _breatheTimer = null;
     _nearbyPois = [];
-    _pendingNearbyPois = [];
-    _nearbyPoisDirty = false;
   }
 
   // ── Clear play history ──────────────────────────────────────────────────────
