@@ -1090,8 +1090,8 @@ class _MapScreenState extends State<MapScreen> {
 
     return Positioned(
       top: top,
-      left: 12,
-      right: 12,
+      left: 16,
+      right: 16,
       child: Card(
         elevation: 6,
         margin: EdgeInsets.zero,
