@@ -1177,7 +1177,7 @@ class _MapScreenState extends State<MapScreen> {
                           SizedBox(
                             height: 28,
                             child: OutlinedButton.icon(
-                              onPressed: (poi.hasPreview && !_learnPlaying)
+                              onPressed: (poi.hasPreview && !_learnPlaying && _loadingLearnPoiId == null)
                                   ? () async {
                                       setState(() => _loadingLearnPoiId = poi.id);
                                       try {
