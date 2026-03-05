@@ -220,6 +220,7 @@ class TripService extends ChangeNotifier {
     // It runs regardless of trip state — queue_narrations controls whether
     // stories are queued server-side.
     _startTimer();
+    _doPing(); // Immediate first ping so nearby POIs populate right away
   }
 
   Future<void> _loadUserPreferences() async {
