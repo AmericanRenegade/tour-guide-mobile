@@ -207,6 +207,12 @@ class _MapScreenState extends State<MapScreen> {
   // ── Narration ──────────────────────────────────────────────────────────────
 
   void _onTripChanged() {
+    // Interrupt check runs regardless of trip state — Learn works even when
+    // not exploring.
+    if (_tripService.isInterrupting && !_learnPlaying) {
+      _startLearnPlayback();
+      return;
+    }
     // Clean up narration card + audio when trip ends
     if (_tripService.tripState == TripState.idle) {
       if (_upNextSeconds > 0) _cancelUpNext();
@@ -221,10 +227,6 @@ class _MapScreenState extends State<MapScreen> {
         _narrationSlideX = 0;
       }
       if (mounted) setState(() {});
-      return;
-    }
-    if (_tripService.isInterrupting && !_learnPlaying) {
-      _startLearnPlayback();
       return;
     }
     if (_tripService.pendingNarration != null && !_playingNarration) {

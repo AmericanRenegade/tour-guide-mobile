@@ -216,6 +216,10 @@ class TripService extends ChangeNotifier {
       await prefs.setString('device_id', id);
     }
     _deviceId = id;
+    // Start the always-on background ping timer now that we have a device ID.
+    // It runs regardless of trip state — queue_narrations controls whether
+    // stories are queued server-side.
+    _startTimer();
   }
 
   Future<void> _loadUserPreferences() async {
@@ -304,18 +308,17 @@ class TripService extends ChangeNotifier {
 
   Future<void> startTrip() async {
     if (_tripState != TripState.idle) return;
-    _clearPool(); // ensure clean state (guards against stop/drain race)
+    _clearPool(); // ensure clean narration state (background pings keep nearbyPois fresh)
     _tripState = TripState.active;
     notifyListeners();
+    // Immediate explore ping with force_new_session; timer already running.
     await _doPing(forceNewSession: true);
-    _startTimer();
   }
 
   void pauseTrip() {
     if (_tripState != TripState.active) return;
     _tripState = TripState.paused;
-    _pingTimer?.cancel();
-    _pingTimer = null;
+    // Timer keeps running — background pings continue for POI freshness.
     notifyListeners();
   }
 
@@ -323,17 +326,15 @@ class TripService extends ChangeNotifier {
     if (_tripState != TripState.paused) return;
     _tripState = TripState.active;
     notifyListeners();
-    _startTimer();
   }
 
   Future<void> stopTrip() async {
     if (_tripState == TripState.idle) return;
-    _pingTimer?.cancel();
-    _pingTimer = null;
+    // Timer keeps running — background pings continue after stop.
     final tripId = _tripId;
     _tripState = TripState.idle;
     _tripId = null;
-    _clearPool();
+    _clearPool(); // clears narration pool; nearbyPois kept for display
     notifyListeners();
     if (tripId != null) {
       await _endSession(tripId);
@@ -380,6 +381,7 @@ class TripService extends ChangeNotifier {
           'latitude': position.latitude,
           'longitude': position.longitude,
           'force_new_session': forceNewSession,
+          'queue_narrations': _tripState != TripState.idle,
           'explore_cooldown_days': _exploreCooldownDays,
           'nearby_radius_miles': _nearbyRadiusMiles,
         }),
@@ -389,10 +391,14 @@ class TripService extends ChangeNotifier {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         final sid = data['session_id'] as String?;
-        if (sid != null && _tripId == null) { _tripId = sid; }
+        // Only store session ID when actively exploring — background pings
+        // return a session but we don't use it for narration dequeue.
+        if (sid != null && _tripId == null && _tripState == TripState.active) {
+          _tripId = sid;
+        }
 
         final pendingCount = (data['pending_count'] as num?)?.toInt() ?? 0;
-        if (pendingCount > 0 && _tripId != null) {
+        if (pendingCount > 0 && _tripId != null && _tripState == TripState.active) {
           _drainServerQueue();
         }
 
@@ -714,8 +720,8 @@ class TripService extends ChangeNotifier {
     _lastPlaybackEndedAt = null;
     _breatheTimer?.cancel();
     _breatheTimer = null;
-    _nearbyPois = [];
     _interruptNarration = null;
+    // _nearbyPois intentionally kept — background pings refresh them continuously.
   }
 
   // ── Clear play history ──────────────────────────────────────────────────────
