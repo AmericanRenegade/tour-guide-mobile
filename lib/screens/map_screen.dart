@@ -401,7 +401,12 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   /// Find the next card to activate (from trip service queue).
+  /// Respects forward-only: never activates a card behind the current view.
   void _activateNextCard() {
+    final currentPage = _carouselController.hasClients
+        ? (_carouselController.page?.round() ?? 0)
+        : -1;
+
     final narration = _tripService.pendingNarration;
     if (narration != null) {
       _removeWaitingPlaceholder();
@@ -413,7 +418,9 @@ class _MapScreenState extends State<MapScreen> {
         _enforceHistoryLimit();
         idx = _carouselItems.length - 1;
       }
-      _activateCard(idx);
+      if (idx >= currentPage) {
+        _activateCard(idx);
+      }
       return;
     }
 
@@ -421,7 +428,6 @@ class _MapScreenState extends State<MapScreen> {
     // behind a breathe timer (show it with countdown on the card).
     final upNext = _tripService.upNextNarration;
     if (upNext != null) {
-      _deactivateCurrentCard();
       _removeWaitingPlaceholder();
       var idx = _carouselItems.indexWhere((c) => c.id == upNext.narrationId);
       if (idx < 0) {
@@ -432,21 +438,24 @@ class _MapScreenState extends State<MapScreen> {
         _enforceHistoryLimit();
         idx = _carouselItems.length - 1;
       }
-      final card = _carouselItems[idx];
-      final breatheLeft = _tripService.breatheSecondsRemaining;
-      if (breatheLeft > 0) {
-        card.countdownSeconds = breatheLeft;
-        if (mounted) {
-          setState(() {
-            _carouselVisible = true;
-            _carouselOpacity = 1.0;
-          });
-          _animateToPage(idx);
+      if (idx >= currentPage) {
+        _deactivateCurrentCard();
+        final card = _carouselItems[idx];
+        final breatheLeft = _tripService.breatheSecondsRemaining;
+        if (breatheLeft > 0) {
+          card.countdownSeconds = breatheLeft;
+          if (mounted) {
+            setState(() {
+              _carouselVisible = true;
+              _carouselOpacity = 1.0;
+            });
+            _animateToPage(idx);
+          }
+          _startBreatheCountdown(idx);
+        } else {
+          _tripService.skipBreatheTimer();
+          _activateCard(idx);
         }
-        _startBreatheCountdown(idx);
-      } else {
-        _tripService.skipBreatheTimer();
-        _activateCard(idx);
       }
       return;
     }
@@ -519,22 +528,62 @@ class _MapScreenState extends State<MapScreen> {
     if (card == null) return;
 
     card.completed = true;
+    final fromIndex = _activeCardIndex;
 
-    // Only auto-advance if the card's narrations are still in the pool
-    // (fresh playback). For replays of already-played cards, just stop.
+    // Remove from pool if still there
     final inPool = card.narrationIds.any(
       (id) => _tripService.narrationPool.any((n) => n.narrationId == id),
     );
-
     if (inPool) {
       _tripService.advanceGroup(card.narrationIds);
-      _activateNextCard();
-    } else {
-      // Replay finished — deactivate, stay on this card
-      card.deactivate();
-      _playingCardId = null;
-      _activeCardIndex = -1;
+    }
+
+    // Sync to pick up any new pool items, then advance forward
+    _syncCarouselWithPool();
+    _advanceForward(fromIndex);
+  }
+
+  /// Advance to the next card after [fromIndex]. Never goes backwards.
+  /// If the next card is completed (Replay), navigates but doesn't auto-play.
+  void _advanceForward(int fromIndex) {
+    _deactivateCurrentCard();
+
+    // Find next non-placeholder card
+    int nextIdx = fromIndex + 1;
+    while (nextIdx < _carouselItems.length &&
+        _carouselItems[nextIdx].isPlaceholder) {
+      nextIdx++;
+    }
+
+    if (nextIdx >= _carouselItems.length) {
+      _addWaitingPlaceholder();
       if (mounted) setState(() {});
+      return;
+    }
+
+    final nextCard = _carouselItems[nextIdx];
+
+    if (nextCard.completed) {
+      // Already finished — sit on it, user must tap Replay
+      _animateToPage(nextIdx);
+      if (mounted) setState(() {});
+      return;
+    }
+
+    // Fresh card — check breathe timer
+    final breatheLeft = _tripService.breatheSecondsRemaining;
+    if (breatheLeft > 0) {
+      nextCard.countdownSeconds = breatheLeft;
+      if (mounted) {
+        setState(() {
+          _carouselVisible = true;
+          _carouselOpacity = 1.0;
+        });
+        _animateToPage(nextIdx);
+      }
+      _startBreatheCountdown(nextIdx);
+    } else {
+      _activateCard(nextIdx);
     }
   }
 
@@ -595,7 +644,14 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
-    // Swiped to any other card → activate it (auto-plays from lastPosition)
+    // Completed cards: don't auto-play, user must tap Replay
+    if (card.completed) {
+      _deactivateCurrentCard();
+      if (mounted) setState(() {});
+      return;
+    }
+
+    // Queued or interrupted card → activate it (auto-plays from lastPosition)
     if (card.state == NarrationCardState.queued) {
       _breatheCountdownTimer?.cancel();
       _tripService.skipBreatheTimer();
@@ -1019,6 +1075,11 @@ class _MapScreenState extends State<MapScreen> {
                     () {
                       final cardIndex = _carouselItems.indexOf(item);
                       final showPause = isActive && !item.paused;
+                      final buttonLabel = showPause
+                          ? 'Pause'
+                          : item.completed
+                              ? 'Replay'
+                              : 'Play';
                       return SizedBox(
                         height: 42,
                         width: 110,
@@ -1031,11 +1092,15 @@ class _MapScreenState extends State<MapScreen> {
                             }
                           },
                           icon: Icon(
-                            showPause ? Icons.pause : Icons.play_arrow,
+                            showPause
+                                ? Icons.pause
+                                : item.completed
+                                    ? Icons.replay
+                                    : Icons.play_arrow,
                             size: 22,
                           ),
                           label: Text(
-                            showPause ? 'Pause' : 'Play',
+                            buttonLabel,
                             style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
                           ),
                           style: ElevatedButton.styleFrom(
