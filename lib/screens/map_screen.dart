@@ -375,13 +375,19 @@ class _MapScreenState extends State<MapScreen> {
           _waitingForReveal = false;
           _countdownSeconds = 0;
         });
+        // Only animate if the user isn't already on the target page (avoids
+        // fighting with a user-initiated swipe that already landed here).
+        final targetPage = _activeCardIndex;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (_carouselController.hasClients) {
-            _carouselController.animateToPage(
-              _activeCardIndex,
-              duration: const Duration(milliseconds: 350),
-              curve: Curves.easeOutCubic,
-            );
+            final currentPage = _carouselController.page?.round() ?? 0;
+            if (currentPage != targetPage) {
+              _carouselController.animateToPage(
+                targetPage,
+                duration: const Duration(milliseconds: 350),
+                curve: Curves.easeOutCubic,
+              );
+            }
           }
         });
       }
@@ -411,8 +417,14 @@ class _MapScreenState extends State<MapScreen> {
     _savePositionOnActiveCard();
 
     // Advance queue (confirms played to backend, removes from local queue)
+    final wasSkipping = _skippingNarration;
     _tripService.advanceQueue();
     _skippingNarration = false;
+    // User explicitly swiped to skip → bypass the breathe delay so the next
+    // narration is immediately available instead of falling through to the
+    // "nothing pending" path (which adds a waiting placeholder and animates
+    // away from the card the user just swiped to).
+    if (wasSkipping) _tripService.skipBreatheTimer();
 
     // Check what's next
     final nextNarration = _tripService.pendingNarration;
@@ -442,7 +454,13 @@ class _MapScreenState extends State<MapScreen> {
     }
     _activeCardIndex = -1;
     _playingNarration = false;
-    _addWaitingPlaceholder();
+    // Only show waiting placeholder if no queued cards remain — queued cards
+    // will play once the breathe timer expires, so showing "Waiting..." would
+    // be misleading (and animating to it causes a flicker).
+    final hasQueued = _carouselItems.any(
+      (c) => c.state == NarrationCardState.queued && !c.isPlaceholder,
+    );
+    if (!hasQueued) _addWaitingPlaceholder();
     if (mounted) setState(() {});
   }
 
