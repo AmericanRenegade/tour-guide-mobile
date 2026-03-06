@@ -374,9 +374,7 @@ class _MapScreenState extends State<MapScreen> {
     _activeCardIndex = index;
     card.activate();
 
-    // Align trip service so _currentlyServed and _activeGroupId match
-    // the card being played. Critical for trivia (ensures interstitial/
-    // answer are served next) and for correct advanceQueue behavior.
+    // Align trip service so _currentlyServed matches the card being played.
     _tripService.serveNarration(card.id);
 
     if (mounted) {
@@ -404,28 +402,14 @@ class _MapScreenState extends State<MapScreen> {
 
   /// Find the next card to activate (from trip service queue).
   void _activateNextCard() {
-    // Check if trip service has a narration ready
     final narration = _tripService.pendingNarration;
     if (narration != null) {
-      // Trivia group: absorb into active card instead of creating a new one
-      final active = _activeCard;
-      if (active != null &&
-          active.isTrivia &&
-          narration.groupId != null &&
-          narration.groupId == active.groupId) {
-        active.absorb(narration);
-        if (mounted) setState(() {});
-        _playActiveCard();
-        return;
-      }
-
-      // Find existing card (from pool sync) or create one
       _removeWaitingPlaceholder();
       var idx = _carouselItems.indexWhere((c) => c.id == narration.narrationId);
       if (idx < 0) {
-        final card = NarrationCardItem.fromPending(narration);
+        final card = _createGroupCard(narration);
         _carouselItems.add(card);
-        _carouselNarrationIds.add(narration.narrationId);
+        for (final id in card.narrationIds) _carouselNarrationIds.add(id);
         _enforceHistoryLimit();
         idx = _carouselItems.length - 1;
       }
@@ -439,13 +423,12 @@ class _MapScreenState extends State<MapScreen> {
     if (upNext != null) {
       _deactivateCurrentCard();
       _removeWaitingPlaceholder();
-      // Find or create the card for the upcoming narration
       var idx = _carouselItems.indexWhere((c) => c.id == upNext.narrationId);
       if (idx < 0) {
-        final card = NarrationCardItem.fromPending(upNext);
+        final card = _createGroupCard(upNext);
         card.state = NarrationCardState.queued;
         _carouselItems.add(card);
-        _carouselNarrationIds.add(upNext.narrationId);
+        for (final id in card.narrationIds) _carouselNarrationIds.add(id);
         _enforceHistoryLimit();
         idx = _carouselItems.length - 1;
       }
@@ -462,7 +445,6 @@ class _MapScreenState extends State<MapScreen> {
         }
         _startBreatheCountdown(idx);
       } else {
-        // Breathe already expired — activate immediately
         _tripService.skipBreatheTimer();
         _activateCard(idx);
       }
@@ -475,7 +457,18 @@ class _MapScreenState extends State<MapScreen> {
     if (mounted) setState(() {});
   }
 
-  /// Play audio for the currently active card.
+  /// Build a card from a narration plus all its group members.
+  NarrationCardItem _createGroupCard(PendingNarration narration) {
+    final group = narration.groupId != null
+        ? _tripService.getGroupNarrations(narration.groupId)
+        : <PendingNarration>[];
+    return NarrationCardItem.fromGroup(
+        group.isNotEmpty ? group : [narration]);
+  }
+
+  /// Play the active card's phase sequence. The card drives the loop:
+  /// stories have 1 phase, trivia has 3 (question → interstitial → answer).
+  /// One _onCardComplete when the entire card is done.
   Future<void> _playActiveCard() async {
     final card = _activeCard;
     if (card == null) return;
@@ -483,48 +476,49 @@ class _MapScreenState extends State<MapScreen> {
     final cardId = card.id;
     _playingCardId = cardId;
 
-    // Show carousel
     if (mounted) setState(() {
       _carouselVisible = true;
       _carouselOpacity = 1.0;
     });
 
-    // Play based on content type / trivia phase
-    if (card.isTourProgress) {
-      await Future.delayed(const Duration(seconds: 4));
-    } else if (card.isTriviaInterstitial) {
-      await _handleTriviaInterstitial(card);
-    } else if (card.isTriviaAnswer && card.answerAudioBase64 != null) {
-      // Trivia answer phase — play the answer audio (not the question's)
-      await _audioService.playBase64(card.answerAudioBase64!);
-    } else if (card.audioBase64 != null) {
-      await _audioService.playBase64(card.audioBase64!,
-          startFrom: card.lastPosition);
-    }
+    // Execute phases sequentially until done or interrupted
+    do {
+      if (_playingCardId != cardId) return; // interrupted externally
+      final phase = card.currentPhase;
 
-    // Audio finished — check if we're still the active playback
-    _onAudioFinished(cardId);
+      switch (phase.type) {
+        case PhaseType.tourProgressDelay:
+          await Future.delayed(const Duration(seconds: 4));
+        case PhaseType.triviaInterstitial:
+          if (mounted) setState(() {});
+          await _handleTriviaInterstitial(card);
+        case PhaseType.audio:
+          if (phase.audioBase64 != null) {
+            if (mounted) setState(() {});
+            await _audioService.playBase64(
+              phase.audioBase64!,
+              startFrom: card.lastPosition,
+            );
+          }
+      }
+
+      if (_playingCardId != cardId) return; // interrupted during phase
+      if (card.paused) return; // paused — user will resume manually
+    } while (card.advancePhase());
+
+    _onCardComplete(cardId);
   }
 
-  /// Called when audio playback completes (naturally or via stop).
-  void _onAudioFinished(String cardId) {
-    // Stale check: if _playingCardId was cleared by _deactivateCurrentCard,
-    // another card was activated externally — bail out.
+  /// Called once when all phases of a card have finished playing.
+  void _onCardComplete(String cardId) {
     if (_playingCardId != cardId) return;
-    // If paused, don't advance — user will resume manually.
-    final card = _activeCard;
-    if (card != null && card.paused) return;
-    // Guard: learn interrupt or trip ended
     if (_learnPlaying) return;
     if (_tripService.tripState == TripState.idle) return;
 
-    // Save final position
+    final card = _activeCard;
     if (card != null) {
-      card.lastPosition = _audioService.currentPosition;
+      _tripService.advanceGroup(card.narrationIds);
     }
-
-    // Advance queue and find next
-    _tripService.advanceQueue();
     _activateNextCard();
   }
 
@@ -626,7 +620,7 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     // Default: 'auto' countdown
-    final seconds = prefs.getInt('trivia_countdown_s') ?? card.revealDelayS ?? 10;
+    final seconds = prefs.getInt('trivia_countdown_s') ?? card.currentPhase.revealDelayS ?? 10;
     card.revealCompleter = Completer<void>();
     card.waitingForReveal = true;
     card.countdownSeconds = seconds;
@@ -696,13 +690,17 @@ class _MapScreenState extends State<MapScreen> {
     }
     bool added = false;
     for (final narration in pool) {
+      // Skip non-leaders — the card will pull the full group at creation
+      if (narration.groupId != null && narration.groupSeq != 0) continue;
       if (_carouselNarrationIds.contains(narration.narrationId)) continue;
-      if (narration.isTriviaInterstitial || narration.isTriviaAnswer) continue;
       if (narration.groupId != null && seenGroups.contains(narration.groupId)) continue;
-      final card = NarrationCardItem.fromPending(narration);
+
+      final card = _createGroupCard(narration);
       card.state = NarrationCardState.queued;
       _carouselItems.add(card);
-      _carouselNarrationIds.add(narration.narrationId);
+      for (final id in card.narrationIds) {
+        _carouselNarrationIds.add(id);
+      }
       if (narration.groupId != null) seenGroups.add(narration.groupId!);
       added = true;
     }

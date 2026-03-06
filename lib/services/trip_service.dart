@@ -116,7 +116,7 @@ class PendingNarration {
 /// Narration flow:
 ///   /ping queues stories server-side → mobile eagerly dequeues all into local pool
 ///   → _resolveNext() picks highest-priority in-geofence narration respecting breathe timer
-///   → MapScreen plays sequentially → advanceQueue() confirms each as played
+///   → MapScreen plays card phases sequentially → advanceGroup() confirms all as played
 class TripService extends ChangeNotifier {
   static const String _backendBase =
       'https://tour-guide-backend-production.up.railway.app';
@@ -156,9 +156,6 @@ class TripService extends ChangeNotifier {
   DateTime? _lastPlaybackEndedAt;
   Timer? _breatheTimer;
 
-  // ── Trivia group atomicity ──────────────────────────────────────────────
-  String? _activeGroupId;
-
   // ── Currently served to MapScreen ───────────────────────────────────────
   PendingNarration? _currentlyServed;
 
@@ -175,9 +172,6 @@ class TripService extends ChangeNotifier {
     final next = _resolveNext();
     if (next != null) {
       _currentlyServed = next;
-      if (next.isTrivia && next.groupId != null) {
-        _activeGroupId = next.groupId;
-      }
     }
     return _currentlyServed;
   }
@@ -543,29 +537,25 @@ class TripService extends ChangeNotifier {
   PendingNarration? _selectCandidate() {
     if (_narrationPool.isEmpty) return null;
 
-    // 1. Trivia group continuation (atomic — no breathe/priority/geofence)
-    if (_activeGroupId != null) {
-      final groupItems = _narrationPool
-          .where((n) => n.groupId == _activeGroupId)
-          .toList()
-        ..sort((a, b) => a.groupSeq.compareTo(b.groupSeq));
-      if (groupItems.isNotEmpty) return groupItems.first;
-      _activeGroupId = null; // group exhausted
-    }
-
-    // 2. Filter to items in geofence (or items without location data)
+    // 1. Filter to items in geofence (or items without location data)
     final eligible = _narrationPool.where(_isInGeofence).toList();
     if (eligible.isEmpty) return null;
 
+    // 2. Only return group leaders (groupSeq == 0 or non-group items).
+    //    The card will pull the full group via getGroupNarrations().
+    final leaders = eligible.where((n) =>
+        n.groupId == null || n.groupSeq == 0).toList();
+    if (leaders.isEmpty) return null;
+
     // 3. Sort by priority (higher = more specific location = plays first),
     //    then by play_order (admin-configured sequence within same priority)
-    eligible.sort((a, b) {
+    leaders.sort((a, b) {
       final priCmp =
           _priorityOf(b.locationType).compareTo(_priorityOf(a.locationType));
       if (priCmp != 0) return priCmp;
       return a.playOrder.compareTo(b.playOrder);
     });
-    return eligible.first;
+    return leaders.first;
   }
 
   PendingNarration? _resolveNext() {
@@ -681,35 +671,31 @@ class TripService extends ChangeNotifier {
     final idx = _narrationPool.indexWhere((n) => n.narrationId == narrationId);
     if (idx < 0) return;
     _currentlyServed = _narrationPool[idx];
-    if (_currentlyServed!.isTrivia && _currentlyServed!.groupId != null) {
-      _activeGroupId = _currentlyServed!.groupId;
-    }
   }
 
   // ── Queue management (called by MapScreen after playback) ─────────────────
 
-  /// Remove the served narration after playback and confirm it as played.
-  void advanceQueue() {
-    if (_currentlyServed == null) return;
-    final played = _currentlyServed!;
-    _narrationPool.removeWhere((n) => n.narrationId == played.narrationId);
+  /// Get all narrations in a group (sorted by groupSeq).
+  List<PendingNarration> getGroupNarrations(String? groupId) {
+    if (groupId == null) return [];
+    return _narrationPool
+        .where((n) => n.groupId == groupId)
+        .toList()
+      ..sort((a, b) => a.groupSeq.compareTo(b.groupSeq));
+  }
+
+  /// Remove all narrations in the card's group after playback completes.
+  /// Confirms each as played, counts as 1 logical item for pacing.
+  void advanceGroup(List<String> narrationIds) {
+    if (narrationIds.isEmpty) return;
+    for (final id in narrationIds) {
+      _narrationPool.removeWhere((n) => n.narrationId == id);
+      _confirmPlayed(id);
+    }
     _playedInBatch++;
     _currentlyServed = null;
-
-    // Fire-and-forget played confirmation to backend
-    _confirmPlayed(played.narrationId);
-
-    // Check if trivia group is continuing
-    final groupContinues = played.groupId != null &&
-        _narrationPool.any((n) => n.groupId == played.groupId);
-
-    if (!groupContinues) {
-      // Group done or non-group item → start breathe timer
-      // Breathe gap = time from when audio ends (or is skipped) to next narration.
-      _activeGroupId = null;
-      _lastPlaybackEndedAt = DateTime.now();
-      _startBreatheTimer();
-    }
+    _lastPlaybackEndedAt = DateTime.now();
+    _startBreatheTimer();
 
     if (_narrationPool.isEmpty) {
       _totalNarrationsInBatch = 0;
@@ -741,7 +727,6 @@ class TripService extends ChangeNotifier {
     _playedInBatch = 0;
     _draining = false;
     _currentlyServed = null;
-    _activeGroupId = null;
     _lastPlaybackEndedAt = null;
     _breatheTimer?.cancel();
     _breatheTimer = null;
