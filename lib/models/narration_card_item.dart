@@ -28,6 +28,9 @@ class NarrationCardItem {
   bool liked;
   final bool isPlaceholder;
 
+  /// Last playback position — stored when audio pauses/stops so replay can resume.
+  Duration lastPosition = Duration.zero;
+
   // ── Trivia single-card support ──
 
   TriviaPhase? triviaPhase;

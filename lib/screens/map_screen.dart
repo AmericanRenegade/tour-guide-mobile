@@ -46,10 +46,12 @@ class _MapScreenState extends State<MapScreen> {
   bool _carouselVisible = false;
   double _carouselOpacity = 1.0;
   final Set<String> _carouselNarrationIds = {};
-  bool _pausedBySwipe = false;
   bool _playingNarration = false;
   bool _narrationPaused = false;
   bool _skippingNarration = false;
+  // Generation counter — incremented on every new playback. Swipe/pause/resume
+  // callbacks check this to avoid acting on a stale playback session.
+  int _playbackGeneration = 0;
 
   // Trivia interstitial state
   bool _waitingForReveal = false;
@@ -245,6 +247,7 @@ class _MapScreenState extends State<MapScreen> {
     // Clean up carousel + audio when trip ends
     if (_tripService.tripState == TripState.idle) {
       if (_playingNarration) {
+        _playbackGeneration++; // invalidate any in-flight playback
         _audioService.stop();
         _playingNarration = false;
         _skippingNarration = false;
@@ -305,13 +308,24 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  /// Save the current playback position on the active card.
+  void _savePositionOnActiveCard() {
+    if (_activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length) {
+      _carouselItems[_activeCardIndex].lastPosition =
+          _audioService.currentPosition;
+    }
+  }
+
   Future<void> _playNarration() async {
     final narration = _tripService.pendingNarration;
     if (narration == null) return;
+
+    // Bump generation — any in-flight swipe/pause callbacks from the previous
+    // playback will see a stale generation and become no-ops.
+    final gen = ++_playbackGeneration;
     _playingNarration = true;
     _skippingNarration = false;
     _narrationPaused = false;
-    _pausedBySwipe = false;
     _removeWaitingPlaceholder();
 
     // Determine relationship to active carousel card
@@ -336,8 +350,9 @@ class _MapScreenState extends State<MapScreen> {
       activeCard.absorb(narration);
       if (mounted) setState(() {});
     } else {
-      // New narration — mark previous active as played
+      // New narration — save position & mark previous active as played
       if (activeCard != null && activeCard.isActive) {
+        _savePositionOnActiveCard();
         activeCard.state = NarrationCardState.played;
         activeCard.playedAt = DateTime.now();
       }
@@ -372,6 +387,9 @@ class _MapScreenState extends State<MapScreen> {
       }
     }
 
+    // Stale check — a newer playback started while we were setting up cards
+    if (gen != _playbackGeneration) return;
+
     // Play audio / handle content type
     if (narration.isTourProgress) {
       await Future.delayed(const Duration(seconds: 4));
@@ -381,10 +399,16 @@ class _MapScreenState extends State<MapScreen> {
       await _audioService.playBase64(narration.audioBase64);
     }
 
+    // Stale check — generation changed while audio was playing
+    if (gen != _playbackGeneration) return;
     // Guard: learn interrupt — _startLearnPlayback() will restart us
     if (_learnPlaying) return;
     // Guard: trip ended — _onTripChanged already cleaned up
     if (_tripService.tripState == TripState.idle) return;
+
+    // Save final position (will be Duration.zero for completed playback, or
+    // the stop point if skipped)
+    _savePositionOnActiveCard();
 
     // Advance queue (confirms played to backend, removes from local queue)
     _tripService.advanceQueue();
@@ -401,6 +425,7 @@ class _MapScreenState extends State<MapScreen> {
           nextNarration.groupId != null &&
           nextNarration.groupId == currentCard.groupId;
       if (!nextSameGroup && currentCard != null && currentCard.isActive) {
+        _savePositionOnActiveCard();
         currentCard.state = NarrationCardState.played;
         currentCard.playedAt = DateTime.now();
       }
@@ -488,13 +513,14 @@ class _MapScreenState extends State<MapScreen> {
   void _onCarouselPageChanged(int index) {
     if (index < 0 || index >= _carouselItems.length) return;
     final card = _carouselItems[index];
+    // Capture generation so rapid swipes don't interfere with each other.
+    final gen = _playbackGeneration;
 
     // Swiped to a queued card → skip current narration or breathe timer
     if (card.state == NarrationCardState.queued && !card.isPlaceholder) {
       if (_playingNarration) {
-        // Stop the current narration — _playNarration loop will advance
+        _savePositionOnActiveCard();
         _skippingNarration = true;
-        _pausedBySwipe = false;
         _audioService.stop();
       } else {
         _tripService.skipBreatheTimer();
@@ -504,14 +530,17 @@ class _MapScreenState extends State<MapScreen> {
 
     // Swiped away from active card → pause; swiped back → resume
     if (_playingNarration && _activeCardIndex >= 0) {
-      if (index != _activeCardIndex && !_pausedBySwipe) {
+      if (index != _activeCardIndex && !_narrationPaused) {
+        _savePositionOnActiveCard();
         _audioService.pause();
-        _pausedBySwipe = true;
-        if (mounted) setState(() => _narrationPaused = true);
-      } else if (index == _activeCardIndex && _pausedBySwipe) {
-        _audioService.resume();
-        _pausedBySwipe = false;
-        if (mounted) setState(() => _narrationPaused = false);
+        if (mounted && gen == _playbackGeneration) {
+          setState(() => _narrationPaused = true);
+        }
+      } else if (index == _activeCardIndex && _narrationPaused) {
+        if (gen == _playbackGeneration) {
+          _audioService.resume();
+          if (mounted) setState(() => _narrationPaused = false);
+        }
       }
     }
   }
@@ -520,6 +549,7 @@ class _MapScreenState extends State<MapScreen> {
     if (_narrationPaused) {
       _audioService.resume();
     } else {
+      _savePositionOnActiveCard();
       _audioService.pause();
     }
     setState(() => _narrationPaused = !_narrationPaused);
@@ -897,7 +927,11 @@ class _MapScreenState extends State<MapScreen> {
                             } else if (isQueued) {
                               _tripService.skipBreatheTimer();
                             } else if (item.hasAudio) {
-                              _audioService.playBase64(item.audioBase64!);
+                              // History replay — resume from last position
+                              _audioService.playBase64(
+                                item.audioBase64!,
+                                startFrom: item.lastPosition,
+                              );
                             }
                           },
                           icon: Icon(

@@ -14,6 +14,9 @@ class AudioService {
 
   bool get isPlaying => _player.playing;
 
+  /// Current playback position.
+  Duration get currentPosition => _player.position;
+
   /// Stream of current playback position (for narration text sync).
   Stream<Duration> get positionStream => _player.positionStream;
 
@@ -22,7 +25,8 @@ class AudioService {
 
   /// Decode a base64-encoded MP3, write it to a temp file, play it,
   /// and return a Future that completes when playback finishes.
-  Future<void> playBase64(String base64Audio) async {
+  /// If [startFrom] is provided, seeks to that position before playing.
+  Future<void> playBase64(String base64Audio, {Duration? startFrom}) async {
     _cancelled = false;
     try {
       final bytes = base64Decode(base64Audio);
@@ -32,6 +36,9 @@ class AudioService {
       await _player.setFilePath(tempFile.path);
       // Guard: stop() may have been called while we were setting up the file.
       if (_cancelled) return;
+      if (startFrom != null && startFrom > Duration.zero) {
+        await _player.seek(startFrom);
+      }
       await _player.play();
       // Wait until playback completes or is stopped.
       await _player.playerStateStream.firstWhere((s) =>
