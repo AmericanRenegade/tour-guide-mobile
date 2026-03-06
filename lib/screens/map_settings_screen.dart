@@ -11,7 +11,7 @@ class MapSettingsScreen extends StatefulWidget {
 class _MapSettingsScreenState extends State<MapSettingsScreen> {
   static const Color _teal = Color(0xFF0d9488);
 
-  String _mapStyle = 'regular';
+  String _mapStyle = 'voyager';
   String _distanceUnit = 'miles';
   bool _loading = true;
 
@@ -24,7 +24,7 @@ class _MapSettingsScreenState extends State<MapSettingsScreen> {
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _mapStyle = prefs.getString('map_style') ?? 'regular';
+      _mapStyle = prefs.getString('map_style') ?? 'voyager';
       _distanceUnit = prefs.getString('distance_unit') ?? 'miles';
       _loading = false;
     });
@@ -82,12 +82,28 @@ class _MapSettingsScreenState extends State<MapSettingsScreen> {
                         isExpanded: true,
                         items: const [
                           DropdownMenuItem(
-                            value: 'regular',
-                            child: Text('Regular (OpenStreetMap)'),
+                            value: 'voyager',
+                            child: Text('Voyager'),
                           ),
                           DropdownMenuItem(
-                            value: 'light',
-                            child: Text('Light (CartoDB Positron)'),
+                            value: 'osm',
+                            child: Text('Standard'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'positron',
+                            child: Text('Light'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'dark',
+                            child: Text('Dark'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'satellite',
+                            child: Text('Satellite'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'topo',
+                            child: Text('Topo'),
                           ),
                         ],
                         onChanged: _setMapStyle,

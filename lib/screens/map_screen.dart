@@ -74,7 +74,7 @@ class _MapScreenState extends State<MapScreen> {
   String _version = '';
 
   // Map style
-  String _mapStyle = 'regular';
+  String _mapStyle = 'voyager';
 
   @override
   void initState() {
@@ -89,9 +89,38 @@ class _MapScreenState extends State<MapScreen> {
     _loadMapStyle();
   }
 
+  String get _tileUrl {
+    switch (_mapStyle) {
+      case 'osm':
+        return 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+      case 'positron':
+        return 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+      case 'dark':
+        return 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+      case 'satellite':
+        return 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+      case 'topo':
+        return 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}';
+      case 'voyager':
+      default:
+        return 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+    }
+  }
+
+  List<String> get _tileSubdomains {
+    switch (_mapStyle) {
+      case 'osm':
+      case 'satellite':
+      case 'topo':
+        return const [];
+      default:
+        return const ['a', 'b', 'c', 'd'];
+    }
+  }
+
   Future<void> _loadMapStyle() async {
     final prefs = await SharedPreferences.getInstance();
-    if (mounted) setState(() => _mapStyle = prefs.getString('map_style') ?? 'regular');
+    if (mounted) setState(() => _mapStyle = prefs.getString('map_style') ?? 'voyager');
   }
 
   @override
@@ -593,10 +622,8 @@ class _MapScreenState extends State<MapScreen> {
       ),
       children: [
         TileLayer(
-          urlTemplate: _mapStyle == 'light'
-              ? 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png'
-              : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-          subdomains: _mapStyle == 'light' ? const ['a', 'b', 'c', 'd'] : const [],
+          urlTemplate: _tileUrl,
+          subdomains: _tileSubdomains,
           userAgentPackageName: 'com.tourguide.app',
         ),
         // POI markers
