@@ -489,11 +489,14 @@ class _MapScreenState extends State<MapScreen> {
       _carouselOpacity = 1.0;
     });
 
-    // Play based on content type
+    // Play based on content type / trivia phase
     if (card.isTourProgress) {
       await Future.delayed(const Duration(seconds: 4));
     } else if (card.isTriviaInterstitial) {
       await _handleTriviaInterstitial(card);
+    } else if (card.isTriviaAnswer && card.answerAudioBase64 != null) {
+      // Trivia answer phase — play the answer audio (not the question's)
+      await _audioService.playBase64(card.answerAudioBase64!);
     } else if (card.audioBase64 != null) {
       await _audioService.playBase64(card.audioBase64!,
           startFrom: card.lastPosition);
