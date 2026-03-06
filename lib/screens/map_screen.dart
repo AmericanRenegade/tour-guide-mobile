@@ -579,24 +579,12 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
-    // Swiped to a queued card → skip breathe countdown and activate
+    // Swiped to any other card → activate it (auto-plays from lastPosition)
     if (card.state == NarrationCardState.queued) {
       _breatheCountdownTimer?.cancel();
       _tripService.skipBreatheTimer();
-      _activateCard(index);
-      return;
     }
-
-    // Swiped to a history card → pause active audio (don't deactivate)
-    if (_isPlaying) {
-      final active = _activeCard;
-      if (active != null && !active.paused) {
-        active.lastPosition = _audioService.currentPosition;
-        _audioService.pause();
-        active.paused = true;
-        if (mounted) setState(() {});
-      }
-    }
+    _activateCard(index);
   }
 
   // ── Trivia interstitial ──────────────────────────────────────────────────
@@ -1004,16 +992,6 @@ class _MapScreenState extends State<MapScreen> {
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
                     ),
                   ),
-                ),
-              ],
-              // Trivia history: show answer text on played trivia cards
-              if (!isActive && item.isTrivia && item.answerText != null) ...[
-                const SizedBox(height: 8),
-                Text(
-                  item.answerText!,
-                  style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
                 ),
               ],
               // Controls row: Play/Pause + Like + Feedback (all cards except interstitial)
