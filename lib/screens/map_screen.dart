@@ -254,6 +254,7 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
     if (_tripService.tripState == TripState.idle) {
+      // Trip ended — clean up even during learn interrupt
       _deactivateCurrentCard();
       _breatheCountdownTimer?.cancel();
       _carouselVisible = false;
@@ -268,6 +269,12 @@ class _MapScreenState extends State<MapScreen> {
       });
       return;
     }
+    if (_learnPlaying) {
+      // During learn interrupt: sync cards into carousel but don't start
+      // playback — restore logic in _startLearnPlayback handles that.
+      _syncCarouselWithPool();
+      return;
+    }
     _syncCarouselWithPool();
     final breatheActive = _breatheCountdownTimer?.isActive ?? false;
     if (!_isPlaying && !breatheActive) {
@@ -279,25 +286,56 @@ class _MapScreenState extends State<MapScreen> {
 
   Future<void> _startLearnPlayback() async {
     _learnPlaying = true;
-    final wasPlaying = _isPlaying;
-    if (wasPlaying) await _audioService.pause();
+
+    // Snapshot: pause audio if a card was actively playing (not user-paused)
+    final activeCard = _activeCard;
+    bool pausedForLearn = false;
+    if (activeCard != null && !activeCard.paused) {
+      activeCard.lastPosition = _audioService.currentPosition;
+      _audioService.pause();
+      pausedForLearn = true;
+    }
+    // Pause breathe countdown (will resume or re-evaluate on restore)
+    _breatheCountdownTimer?.cancel();
+
+    // Hide carousel, show learn card
     if (mounted) setState(() {
       _carouselVisible = false;
       _learnCardVisible = true;
     });
+
+    // Play learn content
     final narration = _tripService.interruptNarration;
     if (narration != null) {
       await _previewAudioService.playBase64(narration.audioBase64);
     }
     _tripService.clearInterrupt();
+
+    // Hide learn card
     if (mounted) setState(() => _learnCardVisible = false);
     _learnPlaying = false;
-    if (wasPlaying) {
-      await _audioService.resume();
-      if (mounted) setState(() {
+
+    // Bail if trip ended or widget disposed while learn was playing
+    if (!mounted || _tripService.tripState == TripState.idle) return;
+
+    // Re-sync carousel with pool (queue may have changed during interrupt)
+    _syncCarouselWithPool();
+
+    // Restore carousel visibility if we have content
+    if (_carouselItems.isNotEmpty && mounted) {
+      setState(() {
         _carouselVisible = true;
         _carouselOpacity = 1.0;
       });
+    }
+
+    // Resume or find next
+    if (pausedForLearn && _activeCardIndex >= 0) {
+      // We paused audio for the learn interrupt — resume from saved position
+      _audioService.resume();
+    } else if (!_isPlaying) {
+      // Nothing was active (breathe countdown, waiting, etc.) — re-evaluate
+      _activateNextCard();
     }
   }
 
