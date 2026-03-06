@@ -253,11 +253,11 @@ class _MapScreenState extends State<MapScreen> {
 
   Future<void> _startLearnPlayback() async {
     _learnPlaying = true;
-    // Stop the main narration — works whether audio has started or not.
-    // The _cancelled flag in AudioService prevents play() from firing if we
-    // stopped it mid-setup (the race condition fix).
+    // Pause (not stop) the main narration so it can resume where it left off.
+    // The _playNarration loop stays suspended at its await — when we resume(),
+    // the audio continues and the loop completes naturally.
     final wasNarrating = _playingNarration;
-    await _audioService.stop();
+    if (wasNarrating) await _audioService.pause();
     if (mounted) setState(() {
       _narrationPaused = false;
       _carouselVisible = false;
@@ -270,14 +270,13 @@ class _MapScreenState extends State<MapScreen> {
     _tripService.clearInterrupt();
     if (mounted) setState(() => _learnCardVisible = false);
     _learnPlaying = false;
-    // Restart the narration that was interrupted (it's still at the front of
-    // the queue since we never called advanceQueue).
+    // Resume main narration from where it was paused
     if (wasNarrating) {
-      _playingNarration = false;
-      if (mounted && _tripService.pendingNarration != null &&
-          _tripService.tripState != TripState.idle) {
-        _playNarration();
-      }
+      await _audioService.resume();
+      if (mounted) setState(() {
+        _carouselVisible = true;
+        _carouselOpacity = 1.0;
+      });
     }
   }
 
