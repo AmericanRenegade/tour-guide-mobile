@@ -1,3 +1,4 @@
+import 'dart:async';
 import '../services/trip_service.dart';
 
 enum NarrationCardState { active, queued, played }
@@ -30,6 +31,14 @@ class NarrationCardItem {
 
   /// Last playback position — stored when audio pauses/stops so replay can resume.
   Duration lastPosition = Duration.zero;
+
+  /// True when this card's audio is paused by the user (or swipe-away).
+  bool paused = false;
+
+  /// Trivia interstitial: waiting for user to reveal the answer.
+  bool waitingForReveal = false;
+  int countdownSeconds = 0;
+  Completer<void>? revealCompleter;
 
   // ── Trivia single-card support ──
 
@@ -99,6 +108,27 @@ class NarrationCardItem {
       answerText = p.narrationText;
       answerAudioBase64 = p.audioBase64;
     }
+  }
+
+  /// Make this card the active playing card.
+  void activate() {
+    state = NarrationCardState.active;
+    paused = false;
+  }
+
+  /// Clean up when this card loses focus / stops playing.
+  void deactivate() {
+    if (state == NarrationCardState.active) {
+      state = NarrationCardState.played;
+      playedAt = DateTime.now();
+    }
+    paused = false;
+    waitingForReveal = false;
+    countdownSeconds = 0;
+    if (revealCompleter != null && !revealCompleter!.isCompleted) {
+      revealCompleter!.complete();
+    }
+    revealCompleter = null;
   }
 
   bool get isPlayed => state == NarrationCardState.played;

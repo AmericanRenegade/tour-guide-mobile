@@ -46,18 +46,11 @@ class _MapScreenState extends State<MapScreen> {
   bool _carouselVisible = false;
   double _carouselOpacity = 1.0;
   final Set<String> _carouselNarrationIds = {};
-  bool _playingNarration = false;
-  bool _narrationPaused = false;
-  bool _skippingNarration = false;
-  // Generation counter — incremented on every new playback. Swipe/pause/resume
-  // callbacks check this to avoid acting on a stale playback session.
-  int _playbackGeneration = 0;
-
-  // Trivia interstitial state
-  bool _waitingForReveal = false;
-  Completer<void>? _revealCompleter;
-  int _countdownSeconds = 0;
-  Timer? _countdownTimer;
+  // Guard: set at _playActiveCard start, cleared by _deactivateCurrentCard.
+  // Prevents stale _onAudioFinished from advancing the queue.
+  String? _playingCardId;
+  Timer? _breatheCountdownTimer;
+  Timer? _countdownTimer; // trivia interstitial countdown
 
   // Active tour
   Tour? _activeTour;
@@ -135,6 +128,7 @@ class _MapScreenState extends State<MapScreen> {
     _nearbyScrollController.dispose();
     _carouselController.dispose();
     _countdownTimer?.cancel();
+    _breatheCountdownTimer?.cancel();
     super.dispose();
   }
 
@@ -237,28 +231,34 @@ class _MapScreenState extends State<MapScreen> {
 
   // ── Narration ──────────────────────────────────────────────────────────────
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CAROUSEL STATE MACHINE
+  //
+  // Single entry point: _activateCard(index) owns all card transitions.
+  // _onTripChanged, _onCarouselPageChanged, and button presses all funnel
+  // through _activateCard. No recursion, no generation counters.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  bool get _isPlaying => _activeCardIndex >= 0;
+
+  NarrationCardItem? get _activeCard =>
+      _activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length
+          ? _carouselItems[_activeCardIndex]
+          : null;
+
+  // ── Trip service listener ────────────────────────────────────────────────
+
   void _onTripChanged() {
-    // Interrupt check runs regardless of trip state — Learn works even when
-    // not exploring.
     if (_tripService.isInterrupting && !_learnPlaying) {
       _startLearnPlayback();
       return;
     }
-    // Clean up carousel + audio when trip ends
     if (_tripService.tripState == TripState.idle) {
-      if (_playingNarration) {
-        _playbackGeneration++; // invalidate any in-flight playback
-        _audioService.stop();
-        _playingNarration = false;
-        _skippingNarration = false;
-      }
-      if (_carouselVisible) {
-        _carouselVisible = false;
-        _carouselOpacity = 0.0;
-      }
-      _activeCardIndex = -1;
+      _deactivateCurrentCard();
+      _breatheCountdownTimer?.cancel();
+      _carouselVisible = false;
+      _carouselOpacity = 0.0;
       if (mounted) setState(() {});
-      // Clear carousel items after slide-down animation
       Future.delayed(const Duration(milliseconds: 400), () {
         if (mounted) {
           _carouselItems.clear();
@@ -268,26 +268,20 @@ class _MapScreenState extends State<MapScreen> {
       });
       return;
     }
-    // Sync carousel with pool — show all queued items as cards
     _syncCarouselWithPool();
-    if (_tripService.pendingNarration != null && !_playingNarration) {
-      _playNarration();
-    } else if (!_playingNarration && _carouselItems.isEmpty) {
-      // Trip just started with nothing queued yet — show waiting card
-      _addWaitingPlaceholder();
-      if (mounted) setState(() {});
+    final breatheActive = _breatheCountdownTimer?.isActive ?? false;
+    if (!_isPlaying && !breatheActive) {
+      _activateNextCard();
     }
   }
 
+  // ── Learn / preview interrupt ────────────────────────────────────────────
+
   Future<void> _startLearnPlayback() async {
     _learnPlaying = true;
-    // Pause (not stop) the main narration so it can resume where it left off.
-    // The _playNarration loop stays suspended at its await — when we resume(),
-    // the audio continues and the loop completes naturally.
-    final wasNarrating = _playingNarration;
-    if (wasNarrating) await _audioService.pause();
+    final wasPlaying = _isPlaying;
+    if (wasPlaying) await _audioService.pause();
     if (mounted) setState(() {
-      _narrationPaused = false;
       _carouselVisible = false;
       _learnCardVisible = true;
     });
@@ -298,8 +292,7 @@ class _MapScreenState extends State<MapScreen> {
     _tripService.clearInterrupt();
     if (mounted) setState(() => _learnCardVisible = false);
     _learnPlaying = false;
-    // Resume main narration from where it was paused
-    if (wasNarrating) {
+    if (wasPlaying) {
       await _audioService.resume();
       if (mounted) setState(() {
         _carouselVisible = true;
@@ -308,160 +301,336 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  /// Save the current playback position on the active card.
-  void _savePositionOnActiveCard() {
-    if (_activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length) {
-      _carouselItems[_activeCardIndex].lastPosition =
-          _audioService.currentPosition;
+  // ── Core state machine ───────────────────────────────────────────────────
+
+  /// Cleanly shut down the current active card.
+  void _deactivateCurrentCard() {
+    if (_activeCardIndex < 0) return;
+    final card = _activeCard;
+    if (card != null) {
+      card.lastPosition = _audioService.currentPosition;
+      card.deactivate();
     }
+    _playingCardId = null;
+    _activeCardIndex = -1;
+    _audioService.stop();
   }
 
-  Future<void> _playNarration() async {
-    final narration = _tripService.pendingNarration;
-    if (narration == null) return;
+  /// THE single transition point — activate a card at [index].
+  /// Called from: swipe, trip service, play button, auto-advance.
+  void _activateCard(int index) {
+    if (index < 0 || index >= _carouselItems.length) return;
+    final card = _carouselItems[index];
+    if (card.isPlaceholder) return;
 
-    // Bump generation — any in-flight swipe/pause callbacks from the previous
-    // playback will see a stale generation and become no-ops.
-    final gen = ++_playbackGeneration;
-    _playingNarration = true;
-    _skippingNarration = false;
-    _narrationPaused = false;
+    // Same card → toggle pause
+    if (index == _activeCardIndex) {
+      _togglePause();
+      return;
+    }
+
+    _deactivateCurrentCard();
     _removeWaitingPlaceholder();
+    _breatheCountdownTimer?.cancel();
 
-    // Determine relationship to active carousel card
-    final activeCard = _activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length
-        ? _carouselItems[_activeCardIndex]
-        : null;
-    final resumingSame = activeCard != null && activeCard.id == narration.narrationId;
-    final sameGroup = !resumingSame &&
-        activeCard != null &&
-        activeCard.isTrivia &&
-        narration.groupId != null &&
-        narration.groupId == activeCard.groupId;
+    _activeCardIndex = index;
+    card.activate();
 
-    if (resumingSame) {
-      // Resuming after learn interrupt — re-show carousel, same card
-      if (mounted) setState(() {
+    if (mounted) {
+      setState(() {
         _carouselVisible = true;
         _carouselOpacity = 1.0;
       });
-    } else if (sameGroup) {
-      // Absorb trivia interstitial/answer into existing card
-      activeCard.absorb(narration);
-      if (mounted) setState(() {});
-    } else {
-      // New narration — save position & mark previous active as played
-      if (activeCard != null && activeCard.isActive) {
-        _savePositionOnActiveCard();
-        activeCard.state = NarrationCardState.played;
-        activeCard.playedAt = DateTime.now();
+      final targetPage = _activeCardIndex;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_carouselController.hasClients) {
+          final currentPage = _carouselController.page?.round() ?? 0;
+          if (currentPage != targetPage) {
+            _carouselController.animateToPage(
+              targetPage,
+              duration: const Duration(milliseconds: 350),
+              curve: Curves.easeOutCubic,
+            );
+          }
+        }
+      });
+    }
+
+    _playActiveCard();
+  }
+
+  /// Find the next card to activate (from trip service queue).
+  void _activateNextCard() {
+    // Check if trip service has a narration ready
+    final narration = _tripService.pendingNarration;
+    if (narration != null) {
+      // Trivia group: absorb into active card instead of creating a new one
+      final active = _activeCard;
+      if (active != null &&
+          active.isTrivia &&
+          narration.groupId != null &&
+          narration.groupId == active.groupId) {
+        active.absorb(narration);
+        if (mounted) setState(() {});
+        _playActiveCard();
+        return;
       }
+
       // Find existing card (from pool sync) or create one
-      final existingIdx = _carouselItems.indexWhere((c) => c.id == narration.narrationId);
-      if (existingIdx >= 0) {
-        _activeCardIndex = existingIdx;
-        _carouselItems[existingIdx].state = NarrationCardState.active;
-      } else {
+      _removeWaitingPlaceholder();
+      var idx = _carouselItems.indexWhere((c) => c.id == narration.narrationId);
+      if (idx < 0) {
         final card = NarrationCardItem.fromPending(narration);
         _carouselItems.add(card);
         _carouselNarrationIds.add(narration.narrationId);
         _enforceHistoryLimit();
-        _activeCardIndex = _carouselItems.length - 1;
+        idx = _carouselItems.length - 1;
       }
-      if (mounted) {
-        setState(() {
-          _carouselVisible = true;
-          _carouselOpacity = 1.0;
-          _waitingForReveal = false;
-          _countdownSeconds = 0;
-        });
-        // Only animate if the user isn't already on the target page (avoids
-        // fighting with a user-initiated swipe that already landed here).
-        final targetPage = _activeCardIndex;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_carouselController.hasClients) {
-            final currentPage = _carouselController.page?.round() ?? 0;
-            if (currentPage != targetPage) {
-              _carouselController.animateToPage(
-                targetPage,
-                duration: const Duration(milliseconds: 350),
-                curve: Curves.easeOutCubic,
-              );
-            }
-          }
-        });
-      }
-    }
-
-    // Stale check — a newer playback started while we were setting up cards
-    if (gen != _playbackGeneration) return;
-
-    // Play audio / handle content type
-    if (narration.isTourProgress) {
-      await Future.delayed(const Duration(seconds: 4));
-    } else if (narration.isTriviaInterstitial) {
-      await _handleTriviaInterstitial(narration);
-    } else {
-      await _audioService.playBase64(narration.audioBase64);
-    }
-
-    // Stale check — generation changed while audio was playing
-    if (gen != _playbackGeneration) return;
-    // Guard: learn interrupt — _startLearnPlayback() will restart us
-    if (_learnPlaying) return;
-    // Guard: trip ended — _onTripChanged already cleaned up
-    if (_tripService.tripState == TripState.idle) return;
-
-    // Save final position (will be Duration.zero for completed playback, or
-    // the stop point if skipped)
-    _savePositionOnActiveCard();
-
-    // Advance queue (confirms played to backend, removes from local queue)
-    final wasSkipping = _skippingNarration;
-    _tripService.advanceQueue();
-    _skippingNarration = false;
-    // User explicitly swiped to skip → bypass the breathe delay so the next
-    // narration is immediately available instead of falling through to the
-    // "nothing pending" path (which adds a waiting placeholder and animates
-    // away from the card the user just swiped to).
-    if (wasSkipping) _tripService.skipBreatheTimer();
-
-    // Check what's next
-    final nextNarration = _tripService.pendingNarration;
-    if (nextNarration != null) {
-      final currentCard = _activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length
-          ? _carouselItems[_activeCardIndex]
-          : null;
-      final nextSameGroup = currentCard != null &&
-          currentCard.isTrivia &&
-          nextNarration.groupId != null &&
-          nextNarration.groupId == currentCard.groupId;
-      if (!nextSameGroup && currentCard != null && currentCard.isActive) {
-        _savePositionOnActiveCard();
-        currentCard.state = NarrationCardState.played;
-        currentCard.playedAt = DateTime.now();
-      }
-      _playingNarration = false;
-      _playNarration();
+      _activateCard(idx);
       return;
     }
 
-    // Nothing pending — mark active card as played, keep carousel visible
-    if (_activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length) {
-      final card = _carouselItems[_activeCardIndex];
-      card.state = NarrationCardState.played;
-      card.playedAt = DateTime.now();
+    // Nothing from pendingNarration — check if there's an upcoming candidate
+    // behind a breathe timer (show it with countdown on the card).
+    final upNext = _tripService.upNextNarration;
+    if (upNext != null) {
+      _deactivateCurrentCard();
+      _removeWaitingPlaceholder();
+      // Find or create the card for the upcoming narration
+      var idx = _carouselItems.indexWhere((c) => c.id == upNext.narrationId);
+      if (idx < 0) {
+        final card = NarrationCardItem.fromPending(upNext);
+        card.state = NarrationCardState.queued;
+        _carouselItems.add(card);
+        _carouselNarrationIds.add(upNext.narrationId);
+        _enforceHistoryLimit();
+        idx = _carouselItems.length - 1;
+      }
+      final card = _carouselItems[idx];
+      final breatheLeft = _tripService.breatheSecondsRemaining;
+      if (breatheLeft > 0) {
+        card.countdownSeconds = breatheLeft;
+        if (mounted) {
+          setState(() {
+            _carouselVisible = true;
+            _carouselOpacity = 1.0;
+          });
+          _animateToPage(idx);
+        }
+        _startBreatheCountdown(idx);
+      } else {
+        // Breathe already expired — activate immediately
+        _tripService.skipBreatheTimer();
+        _activateCard(idx);
+      }
+      return;
     }
-    _activeCardIndex = -1;
-    _playingNarration = false;
-    // Only show waiting placeholder if no queued cards remain — queued cards
-    // will play once the breathe timer expires, so showing "Waiting..." would
-    // be misleading (and animating to it causes a flicker).
-    final hasQueued = _carouselItems.any(
-      (c) => c.state == NarrationCardState.queued && !c.isPlaceholder,
-    );
-    if (!hasQueued) _addWaitingPlaceholder();
+
+    // Nothing in pool at all — show waiting placeholder
+    _deactivateCurrentCard();
+    _addWaitingPlaceholder();
     if (mounted) setState(() {});
+  }
+
+  /// Play audio for the currently active card.
+  Future<void> _playActiveCard() async {
+    final card = _activeCard;
+    if (card == null) return;
+
+    final cardId = card.id;
+    _playingCardId = cardId;
+
+    // Show carousel
+    if (mounted) setState(() {
+      _carouselVisible = true;
+      _carouselOpacity = 1.0;
+    });
+
+    // Play based on content type
+    if (card.isTourProgress) {
+      await Future.delayed(const Duration(seconds: 4));
+    } else if (card.isTriviaInterstitial) {
+      await _handleTriviaInterstitial(card);
+    } else if (card.audioBase64 != null) {
+      await _audioService.playBase64(card.audioBase64!,
+          startFrom: card.lastPosition);
+    }
+
+    // Audio finished — check if we're still the active playback
+    _onAudioFinished(cardId);
+  }
+
+  /// Called when audio playback completes (naturally or via stop).
+  void _onAudioFinished(String cardId) {
+    // Stale check: if _playingCardId was cleared by _deactivateCurrentCard,
+    // another card was activated externally — bail out.
+    if (_playingCardId != cardId) return;
+    // If paused, don't advance — user will resume manually.
+    final card = _activeCard;
+    if (card != null && card.paused) return;
+    // Guard: learn interrupt or trip ended
+    if (_learnPlaying) return;
+    if (_tripService.tripState == TripState.idle) return;
+
+    // Save final position
+    if (card != null) {
+      card.lastPosition = _audioService.currentPosition;
+    }
+
+    // Advance queue and find next
+    _tripService.advanceQueue();
+    _activateNextCard();
+  }
+
+  // ── Breathe countdown (on-card) ──────────────────────────────────────────
+
+  void _startBreatheCountdown(int cardIndex) {
+    _breatheCountdownTimer?.cancel();
+    _breatheCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (cardIndex < 0 || cardIndex >= _carouselItems.length) {
+        timer.cancel();
+        return;
+      }
+      final card = _carouselItems[cardIndex];
+      if (card.countdownSeconds <= 1) {
+        timer.cancel();
+        _breatheCountdownTimer = null;
+        card.countdownSeconds = 0;
+        // Breathe done — activate the card
+        _tripService.skipBreatheTimer();
+        _activateCard(cardIndex);
+        return;
+      }
+      card.countdownSeconds--;
+      if (mounted) setState(() {});
+    });
+  }
+
+  // ── Pause / resume ───────────────────────────────────────────────────────
+
+  void _togglePause() {
+    final card = _activeCard;
+    if (card == null) return;
+    if (card.paused) {
+      _audioService.resume();
+      card.paused = false;
+    } else {
+      card.lastPosition = _audioService.currentPosition;
+      _audioService.pause();
+      card.paused = true;
+    }
+    if (mounted) setState(() {});
+  }
+
+  // ── Swipe handler ────────────────────────────────────────────────────────
+
+  void _onCarouselPageChanged(int index) {
+    if (index < 0 || index >= _carouselItems.length) return;
+    final card = _carouselItems[index];
+    if (card.isPlaceholder) return;
+
+    // Swiped back to active card → resume if paused by swipe-away
+    if (index == _activeCardIndex) {
+      if (card.paused) {
+        _audioService.resume();
+        card.paused = false;
+        if (mounted) setState(() {});
+      }
+      return;
+    }
+
+    // Swiped to a queued card → skip breathe countdown and activate
+    if (card.state == NarrationCardState.queued) {
+      _breatheCountdownTimer?.cancel();
+      _tripService.skipBreatheTimer();
+      _activateCard(index);
+      return;
+    }
+
+    // Swiped to a history card → pause active audio (don't deactivate)
+    if (_isPlaying) {
+      final active = _activeCard;
+      if (active != null && !active.paused) {
+        active.lastPosition = _audioService.currentPosition;
+        _audioService.pause();
+        active.paused = true;
+        if (mounted) setState(() {});
+      }
+    }
+  }
+
+  // ── Trivia interstitial ──────────────────────────────────────────────────
+
+  /// Handle the trivia interstitial pause between question and answer.
+  Future<void> _handleTriviaInterstitial(NarrationCardItem card) async {
+    final prefs = await SharedPreferences.getInstance();
+    final mode = prefs.getString('trivia_reveal_mode') ?? 'auto';
+
+    if (mode == 'instant') return;
+
+    if (mode == 'manual') {
+      card.revealCompleter = Completer<void>();
+      card.waitingForReveal = true;
+      if (mounted) setState(() {});
+      await card.revealCompleter!.future;
+      card.revealCompleter = null;
+      card.waitingForReveal = false;
+      if (mounted) setState(() {});
+      return;
+    }
+
+    // Default: 'auto' countdown
+    final seconds = prefs.getInt('trivia_countdown_s') ?? card.revealDelayS ?? 10;
+    card.revealCompleter = Completer<void>();
+    card.waitingForReveal = true;
+    card.countdownSeconds = seconds;
+    if (mounted) setState(() {});
+
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (card.countdownSeconds <= 1) {
+        timer.cancel();
+        _countdownTimer = null;
+        if (!(card.revealCompleter?.isCompleted ?? true)) {
+          card.revealCompleter?.complete();
+        }
+        return;
+      }
+      card.countdownSeconds--;
+      if (mounted) setState(() {});
+    });
+
+    await card.revealCompleter!.future;
+    _countdownTimer?.cancel();
+    _countdownTimer = null;
+    card.revealCompleter = null;
+    card.waitingForReveal = false;
+    if (mounted) setState(() {});
+  }
+
+  /// Immediately reveal the trivia answer.
+  void _revealTriviaAnswer() {
+    final card = _activeCard;
+    if (card?.revealCompleter != null && !card!.revealCompleter!.isCompleted) {
+      card.revealCompleter!.complete();
+    }
+  }
+
+  // ── Carousel helpers ─────────────────────────────────────────────────────
+
+  void _animateToPage(int index) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_carouselController.hasClients) {
+        final currentPage = _carouselController.page?.round() ?? 0;
+        if (currentPage != index) {
+          _carouselController.animateToPage(
+            index,
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeOutCubic,
+          );
+        }
+      }
+    });
   }
 
   void _enforceHistoryLimit() {
@@ -473,8 +642,6 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  /// Create carousel cards for all pool items not yet shown.
-  /// Trivia interstitial/answer are skipped — they'll be absorbed during playback.
   void _syncCarouselWithPool() {
     final pool = _tripService.narrationPool;
     final seenGroups = <String>{};
@@ -503,169 +670,18 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  /// Add a "Waiting for next tour stop..." placeholder card at the end.
   void _addWaitingPlaceholder() {
-    // Don't double-add
     if (_carouselItems.isNotEmpty && _carouselItems.last.isPlaceholder) return;
     _carouselItems.add(NarrationCardItem.waitingPlaceholder());
     if (!_carouselVisible) {
       _carouselVisible = true;
       _carouselOpacity = 1.0;
     }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_carouselController.hasClients) {
-        _carouselController.animateToPage(
-          _carouselItems.length - 1,
-          duration: const Duration(milliseconds: 350),
-          curve: Curves.easeOutCubic,
-        );
-      }
-    });
+    _animateToPage(_carouselItems.length - 1);
   }
 
-  /// Remove the waiting placeholder (when a real narration arrives).
   void _removeWaitingPlaceholder() {
     _carouselItems.removeWhere((c) => c.isPlaceholder);
-  }
-
-  void _onCarouselPageChanged(int index) {
-    if (index < 0 || index >= _carouselItems.length) return;
-    final card = _carouselItems[index];
-    // Capture generation so rapid swipes don't interfere with each other.
-    final gen = _playbackGeneration;
-
-    // Swiped to a queued card → skip current narration or breathe timer
-    if (card.state == NarrationCardState.queued && !card.isPlaceholder) {
-      if (_playingNarration) {
-        _savePositionOnActiveCard();
-        _skippingNarration = true;
-        _audioService.stop();
-      } else {
-        _tripService.skipBreatheTimer();
-      }
-      return;
-    }
-
-    // Swiped away from active card → pause; swiped back → resume
-    if (_playingNarration && _activeCardIndex >= 0) {
-      if (index != _activeCardIndex && !_narrationPaused) {
-        _savePositionOnActiveCard();
-        _audioService.pause();
-        if (mounted && gen == _playbackGeneration) {
-          setState(() => _narrationPaused = true);
-        }
-      } else if (index == _activeCardIndex && _narrationPaused) {
-        if (gen == _playbackGeneration) {
-          _audioService.resume();
-          if (mounted) setState(() => _narrationPaused = false);
-        }
-      }
-    }
-  }
-
-  void _toggleNarrationPause() {
-    if (_narrationPaused) {
-      _audioService.resume();
-    } else {
-      _savePositionOnActiveCard();
-      _audioService.pause();
-    }
-    setState(() => _narrationPaused = !_narrationPaused);
-  }
-
-  /// Replay a history card — takes over active playback state so play/pause
-  /// controls attach to the correct card.
-  Future<void> _replayHistoryCard(NarrationCardItem item) async {
-    // Cancel any in-flight playback
-    _savePositionOnActiveCard();
-    _playbackGeneration++;
-    await _audioService.stop();
-
-    // Mark old active card as played
-    if (_activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length) {
-      final old = _carouselItems[_activeCardIndex];
-      if (old.isActive) {
-        old.state = NarrationCardState.played;
-        old.playedAt = DateTime.now();
-      }
-    }
-
-    // Make this card the active one
-    final idx = _carouselItems.indexOf(item);
-    _activeCardIndex = idx;
-    item.state = NarrationCardState.active;
-    _narrationPaused = false;
-    _playingNarration = true;
-    if (mounted) setState(() {});
-
-    // Play audio
-    final gen = _playbackGeneration;
-    await _audioService.playBase64(item.audioBase64!, startFrom: item.lastPosition);
-
-    // Audio finished — clean up if not stale
-    if (gen != _playbackGeneration) return;
-    _savePositionOnActiveCard();
-    item.state = NarrationCardState.played;
-    item.playedAt = DateTime.now();
-    _activeCardIndex = -1;
-    _playingNarration = false;
-    if (mounted) setState(() {});
-  }
-
-  /// Handle the trivia interstitial pause between question and answer.
-  /// Reads user preference: 'auto' (countdown), 'manual' (tap), 'instant'.
-  Future<void> _handleTriviaInterstitial(PendingNarration narration) async {
-    final prefs = await SharedPreferences.getInstance();
-    final mode = prefs.getString('trivia_reveal_mode') ?? 'auto';
-
-    if (mode == 'instant') {
-      // Skip interstitial entirely
-      return;
-    }
-
-    if (mode == 'manual') {
-      // Wait for user tap
-      _revealCompleter = Completer<void>();
-      if (mounted) setState(() => _waitingForReveal = true);
-      await _revealCompleter!.future;
-      _revealCompleter = null;
-      if (mounted) setState(() => _waitingForReveal = false);
-      return;
-    }
-
-    // Default: 'auto' countdown — user preference overrides server default
-    final seconds = prefs.getInt('trivia_countdown_s') ?? narration.revealDelayS ?? 10;
-    _revealCompleter = Completer<void>();
-    if (mounted) setState(() {
-      _waitingForReveal = true;
-      _countdownSeconds = seconds;
-    });
-
-    _countdownTimer?.cancel();
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_countdownSeconds <= 1 || _skippingNarration) {
-        timer.cancel();
-        _countdownTimer = null;
-        if (!(_revealCompleter?.isCompleted ?? true)) {
-          _revealCompleter?.complete();
-        }
-        return;
-      }
-      if (mounted) setState(() => _countdownSeconds--);
-    });
-
-    await _revealCompleter!.future;
-    _countdownTimer?.cancel();
-    _countdownTimer = null;
-    _revealCompleter = null;
-    if (mounted) setState(() => _waitingForReveal = false);
-  }
-
-  /// Immediately reveal the trivia answer (tap-to-reveal or skip countdown).
-  void _revealTriviaAnswer() {
-    if (_revealCompleter != null && !_revealCompleter!.isCompleted) {
-      _revealCompleter!.complete();
-    }
   }
 
   // ── Center on user ─────────────────────────────────────────────────────────
@@ -817,7 +833,6 @@ class _MapScreenState extends State<MapScreen> {
       );
     }
 
-    final breatheRemaining = _tripService.breatheSecondsRemaining;
     final isQueued = item.state == NarrationCardState.queued;
     final realCards = _carouselItems.where((c) => !c.isPlaceholder);
 
@@ -835,7 +850,7 @@ class _MapScreenState extends State<MapScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               // "Playing in Xs..." banner for queued cards with breathe delay
-              if (isQueued && breatheRemaining > 0) ...[
+              if (isQueued && item.countdownSeconds > 0) ...[
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -845,7 +860,7 @@ class _MapScreenState extends State<MapScreen> {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    'Playing in ${breatheRemaining}s...',
+                    'Playing in ${item.countdownSeconds}s...',
                     style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w500,
@@ -915,11 +930,11 @@ class _MapScreenState extends State<MapScreen> {
                 ],
               ),
               // Trivia interstitial: countdown or tap-to-reveal (active only)
-              if (isActive && item.isTriviaInterstitial && _waitingForReveal) ...[
+              if (isActive && item.isTriviaInterstitial && item.waitingForReveal) ...[
                 const SizedBox(height: 16),
-                if (_countdownSeconds > 0) ...[
+                if (item.countdownSeconds > 0) ...[
                   Text(
-                    'Answer in $_countdownSeconds s...',
+                    'Answer in ${item.countdownSeconds} s...',
                     style: const TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
@@ -935,7 +950,7 @@ class _MapScreenState extends State<MapScreen> {
                     onPressed: _revealTriviaAnswer,
                     icon: const Icon(Icons.lightbulb_outline, size: 20),
                     label: Text(
-                      _countdownSeconds > 0 ? 'Reveal Now' : 'Tap to Reveal Answer',
+                      item.countdownSeconds > 0 ? 'Reveal Now' : 'Tap to Reveal Answer',
                       style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                     ),
                     style: ElevatedButton.styleFrom(
@@ -964,18 +979,17 @@ class _MapScreenState extends State<MapScreen> {
                   children: [
                     // Play / Pause
                     () {
-                      final showPause = isActive && !_narrationPaused;
+                      final cardIndex = _carouselItems.indexOf(item);
+                      final showPause = isActive && !item.paused;
                       return SizedBox(
                         height: 42,
                         width: 110,
                         child: ElevatedButton.icon(
                           onPressed: () {
                             if (isActive) {
-                              _toggleNarrationPause();
-                            } else if (isQueued) {
-                              _tripService.skipBreatheTimer();
-                            } else if (item.hasAudio) {
-                              _replayHistoryCard(item);
+                              _togglePause();
+                            } else if (cardIndex >= 0) {
+                              _activateCard(cardIndex);
                             }
                           },
                           icon: Icon(
