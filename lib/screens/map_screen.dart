@@ -460,10 +460,16 @@ class _MapScreenState extends State<MapScreen> {
     if (index < 0 || index >= _carouselItems.length) return;
     final card = _carouselItems[index];
 
-    // Swiped to a queued card → skip breathe timer and trigger playback
-    if (card.state == NarrationCardState.queued && !card.isPlaceholder && !_playingNarration) {
-      _tripService.skipBreatheTimer();
-      // _onTripChanged will fire from notifyListeners and start playback
+    // Swiped to a queued card → skip current narration or breathe timer
+    if (card.state == NarrationCardState.queued && !card.isPlaceholder) {
+      if (_playingNarration) {
+        // Stop the current narration — _playNarration loop will advance
+        _skippingNarration = true;
+        _pausedBySwipe = false;
+        _audioService.stop();
+      } else {
+        _tripService.skipBreatheTimer();
+      }
       return;
     }
 
@@ -659,11 +665,8 @@ class _MapScreenState extends State<MapScreen> {
                   controller: _carouselController,
                   physics: const BouncingScrollPhysics(),
                   onPageChanged: _onCarouselPageChanged,
-                  itemCount: _carouselItems.length + 1,
+                  itemCount: _carouselItems.length,
                   itemBuilder: (context, index) {
-                    if (index >= _carouselItems.length) {
-                      return const SizedBox.shrink();
-                    }
                     return Align(
                       alignment: Alignment.bottomCenter,
                       child: _buildCarouselCard(
@@ -855,39 +858,53 @@ class _MapScreenState extends State<MapScreen> {
                 Row(
                   children: [
                     // Play / Pause
-                    SizedBox(
-                      width: 46,
-                      height: 46,
-                      child: IconButton(
-                        padding: EdgeInsets.zero,
-                        icon: Icon(
-                          (isActive && !_narrationPaused)
-                              ? Icons.pause_circle_filled
-                              : Icons.play_circle_filled,
-                          color: _teal,
-                          size: 42,
+                    () {
+                      final showPause = isActive && !_narrationPaused;
+                      return SizedBox(
+                        height: 42,
+                        width: 110,
+                        child: ElevatedButton.icon(
+                          onPressed: () {
+                            if (isActive) {
+                              _toggleNarrationPause();
+                            } else if (isQueued) {
+                              _tripService.skipBreatheTimer();
+                            } else if (item.hasAudio) {
+                              _audioService.playBase64(item.audioBase64!);
+                            }
+                          },
+                          icon: Icon(
+                            showPause ? Icons.pause : Icons.play_arrow,
+                            size: 22,
+                          ),
+                          label: Text(
+                            showPause ? 'Pause' : 'Play',
+                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: showPause
+                                ? const Color(0xFFFBBF24) // yellow
+                                : const Color(0xFF22C55E), // green
+                            foregroundColor: showPause ? Colors.black87 : Colors.white,
+                            elevation: 0,
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(21),
+                            ),
+                          ),
                         ),
-                        onPressed: () {
-                          if (isActive) {
-                            _toggleNarrationPause();
-                          } else if (isQueued) {
-                            _tripService.skipBreatheTimer();
-                          } else if (item.hasAudio) {
-                            _audioService.playBase64(item.audioBase64!);
-                          }
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    // Like
+                      );
+                    }(),
+                    const SizedBox(width: 10),
+                    // Like (heart)
                     SizedBox(
-                      width: 46,
-                      height: 46,
+                      width: 42,
+                      height: 42,
                       child: IconButton(
                         padding: EdgeInsets.zero,
                         icon: Icon(
-                          item.liked ? Icons.thumb_up : Icons.thumb_up_outlined,
-                          color: item.liked ? _teal : Colors.grey.shade400,
+                          item.liked ? Icons.favorite : Icons.favorite_border,
+                          color: item.liked ? Colors.red : Colors.grey.shade400,
                           size: 28,
                         ),
                         onPressed: () {
