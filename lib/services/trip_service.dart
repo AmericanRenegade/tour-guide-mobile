@@ -654,6 +654,14 @@ class TripService extends ChangeNotifier {
 
   static double _toRad(double deg) => deg * pi / 180;
 
+  /// Skip the breathe timer so the next candidate is immediately available.
+  void skipBreatheTimer() {
+    _breatheTimer?.cancel();
+    _breatheTimer = null;
+    _lastPlaybackEndedAt = null;
+    notifyListeners();
+  }
+
   // ── Breathe timer ───────────────────────────────────────────────────────────
 
   void _startBreatheTimer() {

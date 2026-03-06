@@ -25,6 +25,8 @@ class NarrationCardItem {
   NarrationCardState state;
   final DateTime addedAt;
   DateTime? playedAt;
+  bool liked;
+  final bool isPlaceholder;
 
   // ── Trivia single-card support ──
 
@@ -46,6 +48,8 @@ class NarrationCardItem {
     this.audioBase64,
     this.state = NarrationCardState.active,
     this.triviaPhase,
+    this.liked = false,
+    this.isPlaceholder = false,
     DateTime? addedAt,
   }) : addedAt = addedAt ?? DateTime.now();
 
@@ -64,6 +68,18 @@ class NarrationCardItem {
       narrationText: p.narrationText,
       audioBase64: p.audioBase64,
       triviaPhase: isTrivia && p.isTriviaQuestion ? TriviaPhase.question : null,
+    );
+  }
+
+  /// A placeholder card shown while waiting for the next tour stop.
+  factory NarrationCardItem.waitingPlaceholder() {
+    return NarrationCardItem(
+      id: '__waiting__',
+      locationName: '',
+      narrator: '',
+      contentType: 'waiting',
+      isPlaceholder: true,
+      state: NarrationCardState.queued,
     );
   }
 

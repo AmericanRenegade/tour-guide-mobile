@@ -41,7 +41,7 @@ class _MapScreenState extends State<MapScreen> {
   StreamSubscription<Position>? _positionSub;
   // ── Narration carousel state ──
   final List<NarrationCardItem> _carouselItems = [];
-  PageController _carouselController = PageController(viewportFraction: 0.92);
+  final PageController _carouselController = PageController();
   int _activeCardIndex = -1; // index of currently-playing card (-1 = none)
   bool _carouselVisible = false;
   double _carouselOpacity = 1.0;
@@ -50,18 +50,12 @@ class _MapScreenState extends State<MapScreen> {
   bool _playingNarration = false;
   bool _narrationPaused = false;
   bool _skippingNarration = false;
-  bool _narrationMuted = false;
 
   // Trivia interstitial state
   bool _waitingForReveal = false;
   Completer<void>? _revealCompleter;
   int _countdownSeconds = 0;
   Timer? _countdownTimer;
-
-  // "Up next" countdown state
-  int _upNextSeconds = 0;
-  Timer? _upNextTimer;
-  bool _upNextVisible = false;
 
   // Active tour
   Tour? _activeTour;
@@ -110,7 +104,6 @@ class _MapScreenState extends State<MapScreen> {
     _nearbyScrollController.dispose();
     _carouselController.dispose();
     _countdownTimer?.cancel();
-    _upNextTimer?.cancel();
     super.dispose();
   }
 
@@ -222,7 +215,6 @@ class _MapScreenState extends State<MapScreen> {
     }
     // Clean up carousel + audio when trip ends
     if (_tripService.tripState == TripState.idle) {
-      if (_upNextSeconds > 0) _cancelUpNext();
       if (_playingNarration) {
         _audioService.stop();
         _playingNarration = false;
@@ -248,6 +240,10 @@ class _MapScreenState extends State<MapScreen> {
     _syncCarouselWithPool();
     if (_tripService.pendingNarration != null && !_playingNarration) {
       _playNarration();
+    } else if (!_playingNarration && _carouselItems.isEmpty) {
+      // Trip just started with nothing queued yet — show waiting card
+      _addWaitingPlaceholder();
+      if (mounted) setState(() {});
     }
   }
 
@@ -287,7 +283,7 @@ class _MapScreenState extends State<MapScreen> {
     _skippingNarration = false;
     _narrationPaused = false;
     _pausedBySwipe = false;
-    _cancelUpNext();
+    _removeWaitingPlaceholder();
 
     // Determine relationship to active carousel card
     final activeCard = _activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length
@@ -392,9 +388,8 @@ class _MapScreenState extends State<MapScreen> {
     }
     _activeCardIndex = -1;
     _playingNarration = false;
+    _addWaitingPlaceholder();
     if (mounted) setState(() {});
-
-    _startUpNextCountdown();
   }
 
   void _enforceHistoryLimit() {
@@ -436,58 +431,43 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  void _startUpNextCountdown() {
-    final remaining = _tripService.breatheSecondsRemaining;
-    final upNext = _tripService.upNextNarration;
-    if (remaining < 8 || upNext == null) return; // too short for banner
-    if (!mounted) return;
-
-    // Wait 1s pause after card fades before showing banner
-    Future.delayed(const Duration(seconds: 1), () {
-      if (!mounted || _playingNarration) return;
-      final displaySeconds = _tripService.breatheSecondsRemaining - 1; // close 1s early
-      if (displaySeconds <= 0) {
-        _onTripChanged(); // gap already elapsed, trigger next
-        return;
+  /// Add a "Waiting for next tour stop..." placeholder card at the end.
+  void _addWaitingPlaceholder() {
+    // Don't double-add
+    if (_carouselItems.isNotEmpty && _carouselItems.last.isPlaceholder) return;
+    _carouselItems.add(NarrationCardItem.waitingPlaceholder());
+    if (!_carouselVisible) {
+      _carouselVisible = true;
+      _carouselOpacity = 1.0;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_carouselController.hasClients) {
+        _carouselController.animateToPage(
+          _carouselItems.length - 1,
+          duration: const Duration(milliseconds: 350),
+          curve: Curves.easeOutCubic,
+        );
       }
-      setState(() {
-        _upNextSeconds = displaySeconds;
-        _upNextVisible = true;
-      });
-      _upNextTimer?.cancel();
-      _upNextTimer = Timer.periodic(const Duration(seconds: 1), (t) {
-        if (_upNextSeconds <= 1 || _playingNarration) {
-          t.cancel();
-          _upNextTimer = null;
-          // Fade out banner
-          if (mounted) setState(() => _upNextVisible = false);
-          Future.delayed(const Duration(milliseconds: 500), () {
-            if (mounted) setState(() => _upNextSeconds = 0);
-            _onTripChanged(); // re-check pendingNarration
-          });
-          return;
-        }
-        if (mounted) setState(() => _upNextSeconds--);
-      });
     });
   }
 
-  void _cancelUpNext() {
-    _upNextTimer?.cancel();
-    _upNextTimer = null;
-    _upNextSeconds = 0;
-    _upNextVisible = false;
-  }
-
-  void _skipNarration() {
-    _skippingNarration = true;
-    _narrationPaused = false;
-    _pausedBySwipe = false;
-    _audioService.stop();
-    if (mounted) setState(() {});
+  /// Remove the waiting placeholder (when a real narration arrives).
+  void _removeWaitingPlaceholder() {
+    _carouselItems.removeWhere((c) => c.isPlaceholder);
   }
 
   void _onCarouselPageChanged(int index) {
+    if (index < 0 || index >= _carouselItems.length) return;
+    final card = _carouselItems[index];
+
+    // Swiped to a queued card → skip breathe timer and trigger playback
+    if (card.state == NarrationCardState.queued && !card.isPlaceholder && !_playingNarration) {
+      _tripService.skipBreatheTimer();
+      // _onTripChanged will fire from notifyListeners and start playback
+      return;
+    }
+
+    // Swiped away from active card → pause; swiped back → resume
     if (_playingNarration && _activeCardIndex >= 0) {
       if (index != _activeCardIndex && !_pausedBySwipe) {
         _audioService.pause();
@@ -508,11 +488,6 @@ class _MapScreenState extends State<MapScreen> {
       _audioService.pause();
     }
     setState(() => _narrationPaused = !_narrationPaused);
-  }
-
-  void _toggleNarrationMute() {
-    _audioService.toggleMute();
-    setState(() => _narrationMuted = _audioService.isMuted);
   }
 
   /// Handle the trivia interstitial pause between question and answer.
@@ -589,7 +564,6 @@ class _MapScreenState extends State<MapScreen> {
         body: Stack(
           children: [
             _buildMap(),
-            _buildUpNextBanner(),
             _buildNarrationCarousel(),
             _buildCenterButton(),
             _buildTripControls(),
@@ -660,130 +634,6 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // ── "Up next" banner ───────────────────────────────────────────────────────
-
-  Widget _buildUpNextBanner() {
-    final upNext = _tripService.upNextNarration;
-    final showBanner = _upNextSeconds > 0 && upNext != null && !_carouselVisible;
-    return AnimatedPositioned(
-      duration: const Duration(milliseconds: 350),
-      curve: Curves.easeOutCubic,
-      bottom: showBanner && _upNextVisible ? 120 : -200,
-      left: 16,
-      right: 16,
-      child: AnimatedOpacity(
-        duration: const Duration(milliseconds: 500),
-        opacity: _upNextVisible ? 1.0 : 0.0,
-        child: Card(
-          elevation: 4,
-          margin: EdgeInsets.zero,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          color: const Color(0xFFF8FAFC), // slate-50
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            child: Row(
-              children: [
-                // Guide avatar (36x36)
-                _buildSmallGuideAvatar(upNext),
-                const SizedBox(width: 10),
-                // Story title + location
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'Up next',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.grey.shade500,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        (upNext?.storyTitle ?? '').isNotEmpty
-                            ? upNext!.storyTitle!
-                            : upNext?.locationName ?? '',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      if ((upNext?.locationName ?? '').isNotEmpty &&
-                          (upNext?.storyTitle ?? '').isNotEmpty)
-                        Text(
-                          upNext!.locationName,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey.shade600,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // Countdown pill
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: _teal.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    '${_upNextSeconds}s',
-                    style: const TextStyle(
-                      color: _teal,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSmallGuideAvatar(PendingNarration? narration) {
-    const double size = 36;
-    if (narration?.guidePhotoUrl != null) {
-      return ClipOval(
-        child: Image.network(
-          narration!.guidePhotoUrl!,
-          width: size,
-          height: size,
-          fit: BoxFit.cover,
-          errorBuilder: (_, _, _) => Container(
-            width: size,
-            height: size,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              color: Color(0xFFe0f2f1),
-            ),
-            child: const Icon(Icons.volume_up, color: _teal, size: 18),
-          ),
-        ),
-      );
-    }
-    return Container(
-      width: size,
-      height: size,
-      decoration: const BoxDecoration(
-        shape: BoxShape.circle,
-        color: Color(0xFFe0f2f1),
-      ),
-      child: const Icon(Icons.volume_up, color: _teal, size: 18),
-    );
-  }
-
   // ── Narration carousel ───────────────────────────────────────────────────
 
   Widget _buildNarrationCarousel() {
@@ -829,8 +679,43 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _buildCarouselCard(NarrationCardItem item, bool isActive) {
+    // Waiting placeholder card
+    if (item.isPlaceholder) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Card(
+          elevation: 6,
+          margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          color: Colors.white,
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.explore, color: _teal.withValues(alpha: 0.4), size: 40),
+                const SizedBox(height: 12),
+                Text(
+                  'Waiting for next tour stop...',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    final breatheRemaining = _tripService.breatheSecondsRemaining;
+    final isQueued = item.state == NarrationCardState.queued;
+    final realCards = _carouselItems.where((c) => !c.isPlaceholder);
+
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Card(
         elevation: 6,
         margin: EdgeInsets.zero,
@@ -841,6 +726,27 @@ class _MapScreenState extends State<MapScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // "Playing in Xs..." banner for queued cards with breathe delay
+              if (isQueued && breatheRemaining > 0) ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  margin: const EdgeInsets.only(bottom: 10),
+                  decoration: BoxDecoration(
+                    color: _teal.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    'Playing in ${breatheRemaining}s...',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: _teal.withValues(alpha: 0.8),
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ],
               // Top row: guide avatar + title + narrator
               Row(
                 children: [
@@ -882,7 +788,7 @@ class _MapScreenState extends State<MapScreen> {
                       ],
                     ),
                   ),
-                  if (_carouselItems.length > 1)
+                  if (realCards.length > 1)
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
@@ -890,7 +796,7 @@ class _MapScreenState extends State<MapScreen> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: Text(
-                        '${_carouselItems.indexOf(item) + 1} of ${_carouselItems.length}',
+                        '${realCards.toList().indexOf(item) + 1} of ${realCards.length}',
                         style: const TextStyle(
                           color: _teal,
                           fontSize: 13,
@@ -943,59 +849,54 @@ class _MapScreenState extends State<MapScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
               ],
-              // Controls row (active, non-progress, non-interstitial)
-              if (isActive && !item.isTourProgress && !item.isTriviaInterstitial) ...[
+              // Controls row: Play/Pause + Like + Feedback (all cards except interstitial)
+              if (!item.isTourProgress && !item.isTriviaInterstitial) ...[
                 const SizedBox(height: 10),
                 Row(
                   children: [
+                    // Play / Pause
                     SizedBox(
-                      height: 38,
-                      child: ElevatedButton.icon(
-                        onPressed: _skipNarration,
-                        icon: const Icon(Icons.skip_next, size: 20),
-                        label: const Text('Skip',
-                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFFBBF24),
-                          foregroundColor: Colors.black87,
-                          elevation: 0,
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(19)),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    SizedBox(
-                      width: 42,
-                      height: 42,
+                      width: 46,
+                      height: 46,
                       child: IconButton(
                         padding: EdgeInsets.zero,
                         icon: Icon(
-                          _narrationPaused
-                              ? Icons.play_circle_filled
-                              : Icons.pause_circle_filled,
+                          (isActive && !_narrationPaused)
+                              ? Icons.pause_circle_filled
+                              : Icons.play_circle_filled,
                           color: _teal,
-                          size: 38,
+                          size: 42,
                         ),
-                        onPressed: _toggleNarrationPause,
+                        onPressed: () {
+                          if (isActive) {
+                            _toggleNarrationPause();
+                          } else if (isQueued) {
+                            _tripService.skipBreatheTimer();
+                          } else if (item.hasAudio) {
+                            _audioService.playBase64(item.audioBase64!);
+                          }
+                        },
                       ),
                     ),
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 8),
+                    // Like
                     SizedBox(
-                      width: 42,
-                      height: 42,
+                      width: 46,
+                      height: 46,
                       child: IconButton(
                         padding: EdgeInsets.zero,
                         icon: Icon(
-                          _narrationMuted ? Icons.volume_off : Icons.volume_up,
-                          color: Colors.grey.shade500,
+                          item.liked ? Icons.thumb_up : Icons.thumb_up_outlined,
+                          color: item.liked ? _teal : Colors.grey.shade400,
                           size: 28,
                         ),
-                        onPressed: _toggleNarrationMute,
+                        onPressed: () {
+                          setState(() => item.liked = !item.liked);
+                        },
                       ),
                     ),
                     const Spacer(),
+                    // Feedback
                     GestureDetector(
                       onTap: () {},
                       child: const Text(
