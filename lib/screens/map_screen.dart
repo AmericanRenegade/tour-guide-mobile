@@ -9,6 +9,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/active_location.dart';
+import '../models/narration_card_item.dart';
 import '../services/trip_service.dart';
 import '../services/audio_service.dart';
 import '../auth_service.dart';
@@ -38,12 +39,16 @@ class _MapScreenState extends State<MapScreen> {
   LatLng? _userPosition;
   bool _followingUser = true;
   StreamSubscription<Position>? _positionSub;
-  bool _narrationVisible = false;
+  // ── Narration carousel state ──
+  final List<NarrationCardItem> _carouselItems = [];
+  PageController _carouselController = PageController(viewportFraction: 0.92);
+  int _activeCardIndex = -1; // index of currently-playing card (-1 = none)
+  bool _carouselVisible = false;
+  double _carouselOpacity = 1.0;
   bool _playingNarration = false;
   bool _narrationPaused = false;
   bool _skippingNarration = false;
   bool _narrationMuted = false;
-  double _narrationSlideX = 0; // 0 = visible, 1 = slid off right
 
   // Trivia interstitial state
   bool _waitingForReveal = false;
@@ -55,7 +60,6 @@ class _MapScreenState extends State<MapScreen> {
   int _upNextSeconds = 0;
   Timer? _upNextTimer;
   bool _upNextVisible = false;
-  double _narrationOpacity = 1.0;
 
   // Active tour
   Tour? _activeTour;
@@ -102,6 +106,7 @@ class _MapScreenState extends State<MapScreen> {
     _audioService.dispose();
     _previewAudioService.dispose();
     _nearbyScrollController.dispose();
+    _carouselController.dispose();
     _countdownTimer?.cancel();
     _upNextTimer?.cancel();
     super.dispose();
@@ -213,7 +218,7 @@ class _MapScreenState extends State<MapScreen> {
       _startLearnPlayback();
       return;
     }
-    // Clean up narration card + audio when trip ends
+    // Clean up carousel + audio when trip ends
     if (_tripService.tripState == TripState.idle) {
       if (_upNextSeconds > 0) _cancelUpNext();
       if (_playingNarration) {
@@ -221,12 +226,19 @@ class _MapScreenState extends State<MapScreen> {
         _playingNarration = false;
         _skippingNarration = false;
       }
-      if (_narrationVisible) {
-        _narrationVisible = false;
-        _narrationOpacity = 0.0;
-        _narrationSlideX = 0;
+      if (_carouselVisible) {
+        _carouselVisible = false;
+        _carouselOpacity = 0.0;
       }
+      _activeCardIndex = -1;
       if (mounted) setState(() {});
+      // Clear carousel items after slide-down animation
+      Future.delayed(const Duration(milliseconds: 400), () {
+        if (mounted) {
+          _carouselItems.clear();
+          setState(() {});
+        }
+      });
       return;
     }
     if (_tripService.pendingNarration != null && !_playingNarration) {
@@ -243,7 +255,7 @@ class _MapScreenState extends State<MapScreen> {
     await _audioService.stop();
     if (mounted) setState(() {
       _narrationPaused = false;
-      _narrationVisible = false;
+      _carouselVisible = false;
       _learnCardVisible = true;
     });
     final narration = _tripService.interruptNarration;
@@ -270,66 +282,119 @@ class _MapScreenState extends State<MapScreen> {
     _playingNarration = true;
     _skippingNarration = false;
     _narrationPaused = false;
-    // Cancel any running up-next banner
     _cancelUpNext();
-    if (mounted) setState(() {
-      _narrationVisible = true;
-      _narrationOpacity = 1.0;
-      _waitingForReveal = false;
-      _countdownSeconds = 0;
-    });
 
+    // Determine relationship to active carousel card
+    final activeCard = _activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length
+        ? _carouselItems[_activeCardIndex]
+        : null;
+    final resumingSame = activeCard != null && activeCard.id == narration.narrationId;
+    final sameGroup = !resumingSame &&
+        activeCard != null &&
+        activeCard.isTrivia &&
+        narration.groupId != null &&
+        narration.groupId == activeCard.groupId;
+
+    if (resumingSame) {
+      // Resuming after learn interrupt — re-show carousel, same card
+      if (mounted) setState(() {
+        _carouselVisible = true;
+        _carouselOpacity = 1.0;
+      });
+    } else if (sameGroup) {
+      // Absorb trivia interstitial/answer into existing card
+      activeCard.absorb(narration);
+      if (mounted) setState(() {});
+    } else {
+      // New carousel card
+      if (activeCard != null && activeCard.isActive) {
+        activeCard
+          ..state = NarrationCardState.played
+          ..playedAt = DateTime.now()
+          ..dropAudio();
+      }
+      final card = NarrationCardItem.fromPending(narration);
+      _carouselItems.add(card);
+      _enforceHistoryLimit();
+      _activeCardIndex = _carouselItems.length - 1;
+      if (mounted) {
+        setState(() {
+          _carouselVisible = true;
+          _carouselOpacity = 1.0;
+          _waitingForReveal = false;
+          _countdownSeconds = 0;
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_carouselController.hasClients) {
+            _carouselController.animateToPage(
+              _activeCardIndex,
+              duration: const Duration(milliseconds: 350),
+              curve: Curves.easeOutCubic,
+            );
+          }
+        });
+      }
+    }
+
+    // Play audio / handle content type
     if (narration.isTourProgress) {
-      // Tour progress notification — show card briefly, no audio playback
       await Future.delayed(const Duration(seconds: 4));
     } else if (narration.isTriviaInterstitial) {
-      // Trivia interstitial — pause between question and answer
       await _handleTriviaInterstitial(narration);
     } else {
-      // Normal story / trivia question / trivia answer — play audio
       await _audioService.playBase64(narration.audioBase64);
     }
 
-    // If a preview interrupt fired while we were playing (or setting up audio),
-    // bail out — _startLearnPlayback() will restart us after the preview ends.
+    // Guard: learn interrupt — _startLearnPlayback() will restart us
     if (_learnPlaying) return;
-
-    // If trip ended while we were playing, _onTripChanged already cleaned up
+    // Guard: trip ended — _onTripChanged already cleaned up
     if (_tripService.tripState == TripState.idle) return;
 
     // Advance queue (confirms played to backend, removes from local queue)
     _tripService.advanceQueue();
-    final wasSkipped = _skippingNarration;
     _skippingNarration = false;
 
-    // If more narrations in queue and ready immediately, play next
-    if (_tripService.pendingNarration != null) {
-      // Reset slide position so new card appears
-      if (mounted) {
-        setState(() {
-          _narrationSlideX = 0;
-        });
+    // Check what's next
+    final nextNarration = _tripService.pendingNarration;
+    if (nextNarration != null) {
+      final currentCard = _activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length
+          ? _carouselItems[_activeCardIndex]
+          : null;
+      final nextSameGroup = currentCard != null &&
+          currentCard.isTrivia &&
+          nextNarration.groupId != null &&
+          nextNarration.groupId == currentCard.groupId;
+      // If next is NOT same trivia group, mark current as played
+      if (!nextSameGroup && currentCard != null && currentCard.isActive) {
+        currentCard.state = NarrationCardState.played;
+        currentCard.playedAt = DateTime.now();
+        currentCard.dropAudio();
       }
-      if (!wasSkipped) {
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-      if (mounted && _tripService.pendingNarration != null) {
-        _playingNarration = false;
-        _playNarration();
-        return;
-      }
+      _playingNarration = false;
+      _playNarration();
+      return;
     }
 
-    // No more narrations ready now — fade out the card
-    if (mounted) setState(() => _narrationOpacity = 0.0);
-    await Future.delayed(const Duration(milliseconds: 500));
-    if (mounted) setState(() => _narrationVisible = false);
+    // Nothing pending — mark active card as played, keep carousel visible
+    if (_activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length) {
+      final card = _carouselItems[_activeCardIndex];
+      card.state = NarrationCardState.played;
+      card.playedAt = DateTime.now();
+      card.dropAudio();
+    }
+    _activeCardIndex = -1;
     _playingNarration = false;
-    // Reset slideX after card has animated off-screen
-    if (mounted) setState(() => _narrationSlideX = 0);
+    if (mounted) setState(() {});
 
-    // Check if there's an up-next narration behind a breathe gap
     _startUpNextCountdown();
+  }
+
+  void _enforceHistoryLimit() {
+    const maxCards = 25;
+    while (_carouselItems.length > maxCards) {
+      _carouselItems.removeAt(0);
+      if (_activeCardIndex > 0) _activeCardIndex--;
+    }
   }
 
   void _startUpNextCountdown() {
@@ -376,17 +441,10 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _skipNarration() {
-    // Slide card off to the right, then stop audio
-    setState(() {
-      _narrationSlideX = 1;
-      _narrationPaused = false;
-    });
-    Future.delayed(const Duration(milliseconds: 300), () {
-      _skippingNarration = true;
-      _audioService.stop();
-      // Don't reset _narrationSlideX here — _playNarration resets it
-      // only when a new narration is ready or after the card is hidden.
-    });
+    _skippingNarration = true;
+    _narrationPaused = false;
+    _audioService.stop();
+    if (mounted) setState(() {});
   }
 
   void _toggleNarrationPause() {
@@ -478,7 +536,7 @@ class _MapScreenState extends State<MapScreen> {
           children: [
             _buildMap(),
             _buildUpNextBanner(),
-            _buildNarrationCard(),
+            _buildNarrationCarousel(),
             _buildCenterButton(),
             _buildTripControls(),
             _buildVersionLabel(),
@@ -552,7 +610,7 @@ class _MapScreenState extends State<MapScreen> {
 
   Widget _buildUpNextBanner() {
     final upNext = _tripService.upNextNarration;
-    final showBanner = _upNextSeconds > 0 && upNext != null && !_narrationVisible;
+    final showBanner = _upNextSeconds > 0 && upNext != null && !_carouselVisible;
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 350),
       curve: Curves.easeOutCubic,
@@ -672,214 +730,297 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // ── Narration card ─────────────────────────────────────────────────────────
+  // ── Narration carousel ───────────────────────────────────────────────────
 
-  Widget _buildNarrationCard() {
-    final narration = _tripService.pendingNarration;
-    final nearbyExtra = _nearbyVisible ? 236.0 : 0.0; // card 220 + spacing 16
+  Widget _buildNarrationCarousel() {
+    final nearbyExtra = _nearbyVisible ? 236.0 : 0.0;
     final maxCardHeight = MediaQuery.of(context).size.height
-        - MediaQuery.of(context).padding.top - 8 - 40 - 8 // pills row
+        - MediaQuery.of(context).padding.top - 8 - 40 - 8
         - nearbyExtra
-        - 48 - 120; // breathing room + trip controls
+        - 48 - 120;
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 350),
       curve: Curves.easeOutCubic,
-      bottom: _narrationVisible ? 120 : -600,
-      left: 16,
-      right: 16,
-      child: AnimatedSlide(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeInCubic,
-        offset: Offset(_narrationSlideX * 1.5, 0),
-        child: AnimatedOpacity(
-          duration: Duration(milliseconds: _narrationSlideX > 0 ? 250 : 500),
-          opacity: _narrationSlideX > 0 ? 0.0 : _narrationOpacity,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: maxCardHeight),
-            child: Card(
-              elevation: 8,
-              margin: EdgeInsets.zero,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
+      bottom: _carouselVisible ? 120 : -600,
+      left: 0,
+      right: 0,
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 500),
+        opacity: _carouselOpacity,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: maxCardHeight),
+          child: _carouselItems.isEmpty
+              ? const SizedBox.shrink()
+              : PageView.builder(
+                  controller: _carouselController,
+                  physics: const BouncingScrollPhysics(),
+                  itemCount: _carouselItems.length + 1,
+                  itemBuilder: (context, index) {
+                    if (index >= _carouselItems.length) {
+                      return const SizedBox.shrink();
+                    }
+                    return _buildCarouselCard(
+                      _carouselItems[index],
+                      index == _activeCardIndex,
+                    );
+                  },
+                ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCarouselCard(NarrationCardItem item, bool isActive) {
+    final double avatarSize = isActive ? 60 : 48;
+    final double fontSize = isActive ? 14 : 12;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Card(
+        elevation: isActive ? 8 : 3,
+        margin: EdgeInsets.zero,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        color: isActive ? Colors.white : const Color(0xFFF8FAFC),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Top row: guide avatar + title + narrator
+              Row(
                 children: [
-                  // Top row: guide photo + title + narrator
-                  Row(
-                    children: [
-                      _buildGuideAvatar(narration),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _MarqueeText(
-                              text: _narrationTitle(narration),
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.bold, fontSize: 18),
-                            ),
-                            if ((narration?.locationName ?? '').isNotEmpty)
-                              Text(
-                                narration!.locationName,
-                                style: const TextStyle(
-                                    color: Colors.grey, fontSize: 14),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            if ((narration?.narrator ?? '').isNotEmpty &&
-                                !(narration?.isTriviaInterstitial ?? false))
-                              Text(
-                                narration!.narrator,
-                                style: const TextStyle(
-                                    color: Colors.grey, fontSize: 14),
-                              ),
-                          ],
-                        ),
-                      ),
-                      if (_tripService.totalNarrationsInBatch > 1)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: _teal.withValues(alpha: 0.1),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Text(
-                            '${_tripService.currentPlayingIndex} of ${_tripService.totalNarrationsInBatch}',
-                            style: const TextStyle(
-                              color: _teal,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                  // Interstitial: countdown or tap-to-reveal
-                  if (narration != null && narration.isTriviaInterstitial && _waitingForReveal) ...[
-                    const SizedBox(height: 16),
-                    if (_countdownSeconds > 0) ...[
-                      Text(
-                        'Answer in $_countdownSeconds s...',
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF7C3AED), // purple-600
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                    ],
-                    SizedBox(
-                      width: double.infinity,
-                      height: 44,
-                      child: ElevatedButton.icon(
-                        onPressed: _revealTriviaAnswer,
-                        icon: const Icon(Icons.lightbulb_outline, size: 20),
-                        label: Text(
-                          _countdownSeconds > 0 ? 'Reveal Now' : 'Tap to Reveal Answer',
-                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF7C3AED), // purple-600
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-                        ),
-                      ),
-                    ),
-                  ],
-                  // Controls row: Skip, Pause/Play, Mute, Feedback
-                  // Hidden for tour progress and trivia interstitial
-                  if (narration != null &&
-                      !narration.isTourProgress &&
-                      !narration.isTriviaInterstitial) ...[
-                    const SizedBox(height: 10),
-                    Row(
+                  _buildCardAvatar(item, avatarSize),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        // Skip button — yellow, prominent
-                        SizedBox(
-                          height: 38,
-                          child: ElevatedButton.icon(
-                            onPressed: _skipNarration,
-                            icon: const Icon(Icons.skip_next, size: 20),
-                            label: const Text('Skip', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFFFBBF24), // amber-400
-                              foregroundColor: Colors.black87,
-                              elevation: 0,
-                              padding: const EdgeInsets.symmetric(horizontal: 16),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(19)),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        // Pause/Play button — larger
-                        SizedBox(
-                          width: 42,
-                          height: 42,
-                          child: IconButton(
-                            padding: EdgeInsets.zero,
-                            icon: Icon(
-                              _narrationPaused ? Icons.play_circle_filled : Icons.pause_circle_filled,
-                              color: _teal,
-                              size: 38,
-                            ),
-                            onPressed: _toggleNarrationPause,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        // Mute button
-                        SizedBox(
-                          width: 42,
-                          height: 42,
-                          child: IconButton(
-                            padding: EdgeInsets.zero,
-                            icon: Icon(
-                              _narrationMuted ? Icons.volume_off : Icons.volume_up,
-                              color: Colors.grey.shade500,
-                              size: 28,
-                            ),
-                            onPressed: _toggleNarrationMute,
-                          ),
-                        ),
-                        const Spacer(),
-                        // Feedback — blue hyperlink style
-                        GestureDetector(
-                          onTap: () {
-                            // TODO: feedback mechanism
-                          },
-                          child: const Text(
-                            'Feedback',
+                        if (isActive)
+                          _MarqueeText(
+                            text: _cardTitle(item),
+                            style: const TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 18),
+                          )
+                        else
+                          Text(
+                            _cardTitle(item),
                             style: TextStyle(
-                              fontSize: 15,
-                              color: Color(0xFF2563EB), // blue-600
-                              decoration: TextDecoration.underline,
-                              decorationColor: Color(0xFF2563EB),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
+                              color: Colors.grey.shade800,
                             ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                        ),
+                        if (item.locationName.isNotEmpty)
+                          Text(
+                            item.locationName,
+                            style: TextStyle(color: Colors.grey, fontSize: fontSize),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        if (item.narrator.isNotEmpty && !item.isTriviaInterstitial)
+                          Text(
+                            item.narrator,
+                            style: TextStyle(color: Colors.grey, fontSize: fontSize),
+                          ),
                       ],
                     ),
-                  ],
+                  ),
+                  if (isActive && _tripService.totalNarrationsInBatch > 1)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: _teal.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        '${_tripService.currentPlayingIndex} of ${_tripService.totalNarrationsInBatch}',
+                        style: const TextStyle(
+                          color: _teal,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  if (!isActive && item.isPlayed)
+                    Icon(Icons.check_circle, color: Colors.grey.shade400, size: 20),
                 ],
               ),
-            ),
-          ),
+              // Trivia interstitial: countdown or tap-to-reveal (active only)
+              if (isActive && item.isTriviaInterstitial && _waitingForReveal) ...[
+                const SizedBox(height: 16),
+                if (_countdownSeconds > 0) ...[
+                  Text(
+                    'Answer in $_countdownSeconds s...',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF7C3AED),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                SizedBox(
+                  width: double.infinity,
+                  height: 44,
+                  child: ElevatedButton.icon(
+                    onPressed: _revealTriviaAnswer,
+                    icon: const Icon(Icons.lightbulb_outline, size: 20),
+                    label: Text(
+                      _countdownSeconds > 0 ? 'Reveal Now' : 'Tap to Reveal Answer',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF7C3AED),
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+                    ),
+                  ),
+                ),
+              ],
+              // Trivia history: show both question and answer text
+              if (!isActive && item.isPlayed && item.isTrivia && item.answerText != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  item.answerText!,
+                  style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+              // Controls row (active, non-progress, non-interstitial)
+              if (isActive && !item.isTourProgress && !item.isTriviaInterstitial) ...[
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    SizedBox(
+                      height: 38,
+                      child: ElevatedButton.icon(
+                        onPressed: _skipNarration,
+                        icon: const Icon(Icons.skip_next, size: 20),
+                        label: const Text('Skip',
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFFBBF24),
+                          foregroundColor: Colors.black87,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(19)),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    SizedBox(
+                      width: 42,
+                      height: 42,
+                      child: IconButton(
+                        padding: EdgeInsets.zero,
+                        icon: Icon(
+                          _narrationPaused
+                              ? Icons.play_circle_filled
+                              : Icons.pause_circle_filled,
+                          color: _teal,
+                          size: 38,
+                        ),
+                        onPressed: _toggleNarrationPause,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    SizedBox(
+                      width: 42,
+                      height: 42,
+                      child: IconButton(
+                        padding: EdgeInsets.zero,
+                        icon: Icon(
+                          _narrationMuted ? Icons.volume_off : Icons.volume_up,
+                          color: Colors.grey.shade500,
+                          size: 28,
+                        ),
+                        onPressed: _toggleNarrationMute,
+                      ),
+                    ),
+                    const Spacer(),
+                    GestureDetector(
+                      onTap: () {},
+                      child: const Text(
+                        'Feedback',
+                        style: TextStyle(
+                          fontSize: 15,
+                          color: Color(0xFF2563EB),
+                          decoration: TextDecoration.underline,
+                          decorationColor: Color(0xFF2563EB),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ],
           ),
         ),
       ),
     );
   }
 
-  /// Title text for the narration card, varying by content type.
-  String _narrationTitle(PendingNarration? narration) {
-    if (narration == null) return '';
-    if (narration.isTriviaQuestion) return 'Trivia';
-    if (narration.isTriviaInterstitial) return 'Think About It...';
-    if (narration.isTriviaAnswer) return 'Answer';
-    if ((narration.storyTitle ?? '').isNotEmpty) return narration.storyTitle!;
-    return narration.locationName;
+  String _cardTitle(NarrationCardItem item) {
+    if (item.isTriviaQuestion) return 'Trivia';
+    if (item.isTriviaInterstitial) return 'Think About It...';
+    if (item.isTriviaAnswer) return 'Answer';
+    if ((item.storyTitle ?? '').isNotEmpty) return item.storyTitle!;
+    return item.locationName;
+  }
+
+  Widget _buildCardAvatar(NarrationCardItem item, double size) {
+    if (item.isTourProgress) {
+      return Container(
+        width: size, height: size,
+        decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFFFFF8E1)),
+        child: Icon(Icons.emoji_events, color: const Color(0xFFF9A825), size: size * 0.53),
+      );
+    }
+    if (item.isTriviaQuestion) {
+      return Container(
+        width: size, height: size,
+        decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFFF3E8FF)),
+        child: Center(child: Text('\u2753', style: TextStyle(fontSize: size * 0.47))),
+      );
+    }
+    if (item.isTriviaInterstitial) {
+      return Container(
+        width: size, height: size,
+        decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFFF3E8FF)),
+        child: Icon(Icons.timer, color: const Color(0xFF7C3AED), size: size * 0.53),
+      );
+    }
+    if (item.isTriviaAnswer) {
+      return Container(
+        width: size, height: size,
+        decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFFDCFCE7)),
+        child: Center(child: Text('\u{1F4A1}', style: TextStyle(fontSize: size * 0.47))),
+      );
+    }
+    if (item.guidePhotoUrl != null) {
+      return ClipOval(
+        child: Image.network(
+          item.guidePhotoUrl!,
+          width: size, height: size,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => _fallbackAvatarSized(size),
+        ),
+      );
+    }
+    return _fallbackAvatarSized(size);
+  }
+
+  Widget _fallbackAvatarSized(double size) {
+    return Container(
+      width: size, height: size,
+      decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFFe0f2f1)),
+      child: Icon(Icons.volume_up, color: _teal, size: size * 0.5),
+    );
   }
 
   Widget _buildGuideAvatar(PendingNarration? narration) {
@@ -966,9 +1107,9 @@ class _MapScreenState extends State<MapScreen> {
       right: 16,
       child: AnimatedOpacity(
         duration: const Duration(milliseconds: 250),
-        opacity: _narrationVisible ? 0.0 : 1.0,
+        opacity: _carouselVisible ? 0.0 : 1.0,
         child: IgnorePointer(
-          ignoring: _narrationVisible,
+          ignoring: _carouselVisible,
           child: Material(
             elevation: 4,
             shape: const CircleBorder(),
