@@ -718,11 +718,6 @@ class _MapScreenState extends State<MapScreen> {
   // ── Narration carousel ───────────────────────────────────────────────────
 
   Widget _buildNarrationCarousel() {
-    final nearbyExtra = _nearbyVisible ? 236.0 : 0.0;
-    final maxCardHeight = MediaQuery.of(context).size.height
-        - MediaQuery.of(context).padding.top - 8 - 40 - 8
-        - nearbyExtra
-        - 48 - 120;
     return AnimatedPositioned(
       duration: const Duration(milliseconds: 350),
       curve: Curves.easeOutCubic,
@@ -732,26 +727,20 @@ class _MapScreenState extends State<MapScreen> {
       child: AnimatedOpacity(
         duration: const Duration(milliseconds: 500),
         opacity: _carouselOpacity,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: maxCardHeight),
-          child: _carouselItems.isEmpty
-              ? const SizedBox.shrink()
-              : PageView.builder(
-                  controller: _carouselController,
-                  physics: const BouncingScrollPhysics(),
-                  onPageChanged: _onCarouselPageChanged,
-                  itemCount: _carouselItems.length,
-                  itemBuilder: (context, index) {
-                    return Align(
-                      alignment: Alignment.bottomCenter,
-                      child: _buildCarouselCard(
-                        _carouselItems[index],
-                        index == _activeCardIndex,
-                      ),
-                    );
-                  },
-                ),
-        ),
+        child: _carouselItems.isEmpty
+            ? const SizedBox.shrink()
+            : _ExpandablePageView(
+                controller: _carouselController,
+                physics: const BouncingScrollPhysics(),
+                onPageChanged: _onCarouselPageChanged,
+                itemCount: _carouselItems.length,
+                itemBuilder: (context, index) {
+                  return _buildCarouselCard(
+                    _carouselItems[index],
+                    index == _activeCardIndex,
+                  );
+                },
+              ),
       ),
     );
   }
@@ -1725,5 +1714,144 @@ class _MarqueeTextState extends State<_MarqueeText> {
       physics: const NeverScrollableScrollPhysics(),
       child: Text(widget.text, style: widget.style, maxLines: 1),
     );
+  }
+}
+
+// ── Expandable PageView ─────────────────────────────────────────────────────
+// A PageView whose height adapts to the current page's content.
+// Measures each page's natural height after layout and interpolates smoothly
+// as the user swipes between pages.
+
+class _ExpandablePageView extends StatefulWidget {
+  final PageController controller;
+  final int itemCount;
+  final Widget Function(BuildContext, int) itemBuilder;
+  final ValueChanged<int>? onPageChanged;
+  final ScrollPhysics? physics;
+  final double fallbackHeight;
+
+  const _ExpandablePageView({
+    required this.controller,
+    required this.itemCount,
+    required this.itemBuilder,
+    this.onPageChanged,
+    this.physics,
+    this.fallbackHeight = 200.0,
+  });
+
+  @override
+  State<_ExpandablePageView> createState() => _ExpandablePageViewState();
+}
+
+class _ExpandablePageViewState extends State<_ExpandablePageView> {
+  final Map<int, double> _heights = {};
+  double _currentHeight = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentHeight = widget.fallbackHeight;
+    widget.controller.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onScroll);
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!widget.controller.hasClients) return;
+    final page = widget.controller.page ?? 0;
+    final lower = page.floor().clamp(0, widget.itemCount - 1);
+    final upper = page.ceil().clamp(0, widget.itemCount - 1);
+    final t = page - page.floor();
+    final lowerH = _heights[lower] ?? widget.fallbackHeight;
+    final upperH = _heights[upper] ?? widget.fallbackHeight;
+    final interpolated = lowerH + (upperH - lowerH) * t;
+    if ((interpolated - _currentHeight).abs() > 0.5) {
+      setState(() => _currentHeight = interpolated);
+    }
+  }
+
+  void _onChildSized(int index, double height) {
+    if ((_heights[index] ?? 0) == height) return;
+    _heights[index] = height;
+    // If this is the current page (or we haven't sized yet), update immediately
+    final currentPage = widget.controller.hasClients
+        ? (widget.controller.page?.round() ?? 0)
+        : 0;
+    if (index == currentPage) {
+      setState(() => _currentHeight = height);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOutCubic,
+      height: _currentHeight,
+      child: PageView.builder(
+        controller: widget.controller,
+        physics: widget.physics,
+        onPageChanged: widget.onPageChanged,
+        itemCount: widget.itemCount,
+        itemBuilder: (context, index) {
+          return OverflowBox(
+            minHeight: 0,
+            maxHeight: double.infinity,
+            alignment: Alignment.bottomCenter,
+            child: _SizeReporter(
+              onSized: (size) => _onChildSized(index, size.height),
+              child: widget.itemBuilder(context, index),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Reports its child's rendered size after every layout.
+class _SizeReporter extends StatefulWidget {
+  final Widget child;
+  final ValueChanged<Size> onSized;
+  const _SizeReporter({required this.child, required this.onSized});
+
+  @override
+  State<_SizeReporter> createState() => _SizeReporterState();
+}
+
+class _SizeReporterState extends State<_SizeReporter> {
+  final _key = GlobalKey();
+  Size _lastSize = Size.zero;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measure());
+  }
+
+  void _measure() {
+    final rb = _key.currentContext?.findRenderObject() as RenderBox?;
+    if (rb != null && rb.hasSize) {
+      final size = rb.size;
+      if (size != _lastSize) {
+        _lastSize = size;
+        widget.onSized(size);
+      }
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _SizeReporter oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measure());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(key: _key, child: widget.child);
   }
 }
