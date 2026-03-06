@@ -516,10 +516,26 @@ class _MapScreenState extends State<MapScreen> {
     if (_tripService.tripState == TripState.idle) return;
 
     final card = _activeCard;
-    if (card != null) {
+    if (card == null) return;
+
+    card.completed = true;
+
+    // Only auto-advance if the card's narrations are still in the pool
+    // (fresh playback). For replays of already-played cards, just stop.
+    final inPool = card.narrationIds.any(
+      (id) => _tripService.narrationPool.any((n) => n.narrationId == id),
+    );
+
+    if (inPool) {
       _tripService.advanceGroup(card.narrationIds);
+      _activateNextCard();
+    } else {
+      // Replay finished — deactivate, stay on this card
+      card.deactivate();
+      _playingCardId = null;
+      _activeCardIndex = -1;
+      if (mounted) setState(() {});
     }
-    _activateNextCard();
   }
 
   // ── Breathe countdown (on-card) ──────────────────────────────────────────

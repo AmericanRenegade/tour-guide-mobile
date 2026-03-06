@@ -63,6 +63,9 @@ class NarrationCardItem {
   /// True when this card's audio is paused by the user (or swipe-away).
   bool paused = false;
 
+  /// True when all phases finished naturally (not interrupted by swipe).
+  bool completed = false;
+
   /// Trivia interstitial: waiting for user to reveal the answer.
   bool waitingForReveal = false;
   int countdownSeconds = 0;
@@ -183,6 +186,12 @@ class NarrationCardItem {
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
   void activate() {
+    // If card finished playing, reset to beginning for replay
+    if (completed) {
+      _phaseIndex = 0;
+      lastPosition = Duration.zero;
+      completed = false;
+    }
     state = NarrationCardState.active;
     paused = false;
   }
