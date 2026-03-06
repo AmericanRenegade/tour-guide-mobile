@@ -45,6 +45,8 @@ class _MapScreenState extends State<MapScreen> {
   int _activeCardIndex = -1; // index of currently-playing card (-1 = none)
   bool _carouselVisible = false;
   double _carouselOpacity = 1.0;
+  final Set<String> _carouselNarrationIds = {};
+  bool _pausedBySwipe = false;
   bool _playingNarration = false;
   bool _narrationPaused = false;
   bool _skippingNarration = false;
@@ -236,11 +238,14 @@ class _MapScreenState extends State<MapScreen> {
       Future.delayed(const Duration(milliseconds: 400), () {
         if (mounted) {
           _carouselItems.clear();
+          _carouselNarrationIds.clear();
           setState(() {});
         }
       });
       return;
     }
+    // Sync carousel with pool — show all queued items as cards
+    _syncCarouselWithPool();
     if (_tripService.pendingNarration != null && !_playingNarration) {
       _playNarration();
     }
@@ -282,6 +287,7 @@ class _MapScreenState extends State<MapScreen> {
     _playingNarration = true;
     _skippingNarration = false;
     _narrationPaused = false;
+    _pausedBySwipe = false;
     _cancelUpNext();
 
     // Determine relationship to active carousel card
@@ -306,17 +312,23 @@ class _MapScreenState extends State<MapScreen> {
       activeCard.absorb(narration);
       if (mounted) setState(() {});
     } else {
-      // New carousel card
+      // New narration — mark previous active as played
       if (activeCard != null && activeCard.isActive) {
-        activeCard
-          ..state = NarrationCardState.played
-          ..playedAt = DateTime.now()
-          ..dropAudio();
+        activeCard.state = NarrationCardState.played;
+        activeCard.playedAt = DateTime.now();
       }
-      final card = NarrationCardItem.fromPending(narration);
-      _carouselItems.add(card);
-      _enforceHistoryLimit();
-      _activeCardIndex = _carouselItems.length - 1;
+      // Find existing card (from pool sync) or create one
+      final existingIdx = _carouselItems.indexWhere((c) => c.id == narration.narrationId);
+      if (existingIdx >= 0) {
+        _activeCardIndex = existingIdx;
+        _carouselItems[existingIdx].state = NarrationCardState.active;
+      } else {
+        final card = NarrationCardItem.fromPending(narration);
+        _carouselItems.add(card);
+        _carouselNarrationIds.add(narration.narrationId);
+        _enforceHistoryLimit();
+        _activeCardIndex = _carouselItems.length - 1;
+      }
       if (mounted) {
         setState(() {
           _carouselVisible = true;
@@ -364,11 +376,9 @@ class _MapScreenState extends State<MapScreen> {
           currentCard.isTrivia &&
           nextNarration.groupId != null &&
           nextNarration.groupId == currentCard.groupId;
-      // If next is NOT same trivia group, mark current as played
       if (!nextSameGroup && currentCard != null && currentCard.isActive) {
         currentCard.state = NarrationCardState.played;
         currentCard.playedAt = DateTime.now();
-        currentCard.dropAudio();
       }
       _playingNarration = false;
       _playNarration();
@@ -380,7 +390,6 @@ class _MapScreenState extends State<MapScreen> {
       final card = _carouselItems[_activeCardIndex];
       card.state = NarrationCardState.played;
       card.playedAt = DateTime.now();
-      card.dropAudio();
     }
     _activeCardIndex = -1;
     _playingNarration = false;
@@ -392,8 +401,39 @@ class _MapScreenState extends State<MapScreen> {
   void _enforceHistoryLimit() {
     const maxCards = 25;
     while (_carouselItems.length > maxCards) {
+      _carouselNarrationIds.remove(_carouselItems[0].id);
       _carouselItems.removeAt(0);
       if (_activeCardIndex > 0) _activeCardIndex--;
+    }
+  }
+
+  /// Create carousel cards for all pool items not yet shown.
+  /// Trivia interstitial/answer are skipped — they'll be absorbed during playback.
+  void _syncCarouselWithPool() {
+    final pool = _tripService.narrationPool;
+    final seenGroups = <String>{};
+    for (final item in _carouselItems) {
+      if (item.groupId != null) seenGroups.add(item.groupId!);
+    }
+    bool added = false;
+    for (final narration in pool) {
+      if (_carouselNarrationIds.contains(narration.narrationId)) continue;
+      if (narration.isTriviaInterstitial || narration.isTriviaAnswer) continue;
+      if (narration.groupId != null && seenGroups.contains(narration.groupId)) continue;
+      final card = NarrationCardItem.fromPending(narration);
+      card.state = NarrationCardState.queued;
+      _carouselItems.add(card);
+      _carouselNarrationIds.add(narration.narrationId);
+      if (narration.groupId != null) seenGroups.add(narration.groupId!);
+      added = true;
+    }
+    if (added) {
+      _enforceHistoryLimit();
+      if (!_carouselVisible && _carouselItems.isNotEmpty) {
+        _carouselVisible = true;
+        _carouselOpacity = 1.0;
+      }
+      if (mounted) setState(() {});
     }
   }
 
@@ -443,8 +483,23 @@ class _MapScreenState extends State<MapScreen> {
   void _skipNarration() {
     _skippingNarration = true;
     _narrationPaused = false;
+    _pausedBySwipe = false;
     _audioService.stop();
     if (mounted) setState(() {});
+  }
+
+  void _onCarouselPageChanged(int index) {
+    if (_playingNarration && _activeCardIndex >= 0) {
+      if (index != _activeCardIndex && !_pausedBySwipe) {
+        _audioService.pause();
+        _pausedBySwipe = true;
+        if (mounted) setState(() => _narrationPaused = true);
+      } else if (index == _activeCardIndex && _pausedBySwipe) {
+        _audioService.resume();
+        _pausedBySwipe = false;
+        if (mounted) setState(() => _narrationPaused = false);
+      }
+    }
   }
 
   void _toggleNarrationPause() {
@@ -754,14 +809,18 @@ class _MapScreenState extends State<MapScreen> {
               : PageView.builder(
                   controller: _carouselController,
                   physics: const BouncingScrollPhysics(),
+                  onPageChanged: _onCarouselPageChanged,
                   itemCount: _carouselItems.length + 1,
                   itemBuilder: (context, index) {
                     if (index >= _carouselItems.length) {
                       return const SizedBox.shrink();
                     }
-                    return _buildCarouselCard(
-                      _carouselItems[index],
-                      index == _activeCardIndex,
+                    return Align(
+                      alignment: Alignment.bottomCenter,
+                      child: _buildCarouselCard(
+                        _carouselItems[index],
+                        index == _activeCardIndex,
+                      ),
                     );
                   },
                 ),
@@ -771,15 +830,13 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _buildCarouselCard(NarrationCardItem item, bool isActive) {
-    final double avatarSize = isActive ? 60 : 48;
-    final double fontSize = isActive ? 14 : 12;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: Card(
-        elevation: isActive ? 8 : 3,
+        elevation: 6,
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        color: isActive ? Colors.white : const Color(0xFFF8FAFC),
+        color: Colors.white,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -788,7 +845,7 @@ class _MapScreenState extends State<MapScreen> {
               // Top row: guide avatar + title + narrator
               Row(
                 children: [
-                  _buildCardAvatar(item, avatarSize),
+                  _buildCardAvatar(item, 56),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
@@ -804,10 +861,9 @@ class _MapScreenState extends State<MapScreen> {
                         else
                           Text(
                             _cardTitle(item),
-                            style: TextStyle(
+                            style: const TextStyle(
                               fontWeight: FontWeight.bold,
                               fontSize: 16,
-                              color: Colors.grey.shade800,
                             ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
@@ -815,19 +871,19 @@ class _MapScreenState extends State<MapScreen> {
                         if (item.locationName.isNotEmpty)
                           Text(
                             item.locationName,
-                            style: TextStyle(color: Colors.grey, fontSize: fontSize),
+                            style: const TextStyle(color: Colors.grey, fontSize: 13),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
                         if (item.narrator.isNotEmpty && !item.isTriviaInterstitial)
                           Text(
                             item.narrator,
-                            style: TextStyle(color: Colors.grey, fontSize: fontSize),
+                            style: const TextStyle(color: Colors.grey, fontSize: 13),
                           ),
                       ],
                     ),
                   ),
-                  if (isActive && _tripService.totalNarrationsInBatch > 1)
+                  if (_carouselItems.length > 1)
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
@@ -835,7 +891,7 @@ class _MapScreenState extends State<MapScreen> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: Text(
-                        '${_tripService.currentPlayingIndex} of ${_tripService.totalNarrationsInBatch}',
+                        '${_carouselItems.indexOf(item) + 1} of ${_carouselItems.length}',
                         style: const TextStyle(
                           color: _teal,
                           fontSize: 13,
@@ -843,8 +899,6 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                       ),
                     ),
-                  if (!isActive && item.isPlayed)
-                    Icon(Icons.check_circle, color: Colors.grey.shade400, size: 20),
                 ],
               ),
               // Trivia interstitial: countdown or tap-to-reveal (active only)
@@ -880,8 +934,8 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                 ),
               ],
-              // Trivia history: show both question and answer text
-              if (!isActive && item.isPlayed && item.isTrivia && item.answerText != null) ...[
+              // Trivia history: show answer text on played trivia cards
+              if (!isActive && item.isTrivia && item.answerText != null) ...[
                 const SizedBox(height: 8),
                 Text(
                   item.answerText!,

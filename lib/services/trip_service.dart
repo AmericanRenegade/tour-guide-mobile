@@ -185,6 +185,9 @@ class TripService extends ChangeNotifier {
   /// Number of narrations remaining in the local pool.
   int get narrationQueueLength => _narrationPool.length;
 
+  /// Read-only view of the narration pool (for carousel sync).
+  List<PendingNarration> get narrationPool => List.unmodifiable(_narrationPool);
+
   /// Nearby POIs from the last ping response.
   List<NearbyPoi> get nearbyPois => _nearbyPois;
 

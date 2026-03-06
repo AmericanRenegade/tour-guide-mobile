@@ -1,6 +1,6 @@
 import '../services/trip_service.dart';
 
-enum NarrationCardState { active, played }
+enum NarrationCardState { active, queued, played }
 
 enum TriviaPhase { question, interstitial, answer }
 
@@ -19,7 +19,7 @@ class NarrationCardItem {
   final String narrationText;
 
   /// Audio for the primary content (question for trivia, story otherwise).
-  /// Dropped after playback to save memory.
+  /// Kept after playback so users can re-listen.
   String? audioBase64;
 
   NarrationCardState state;
