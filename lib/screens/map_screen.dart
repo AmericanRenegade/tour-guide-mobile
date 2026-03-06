@@ -573,6 +573,45 @@ class _MapScreenState extends State<MapScreen> {
     setState(() => _narrationPaused = !_narrationPaused);
   }
 
+  /// Replay a history card — takes over active playback state so play/pause
+  /// controls attach to the correct card.
+  Future<void> _replayHistoryCard(NarrationCardItem item) async {
+    // Cancel any in-flight playback
+    _savePositionOnActiveCard();
+    _playbackGeneration++;
+    await _audioService.stop();
+
+    // Mark old active card as played
+    if (_activeCardIndex >= 0 && _activeCardIndex < _carouselItems.length) {
+      final old = _carouselItems[_activeCardIndex];
+      if (old.isActive) {
+        old.state = NarrationCardState.played;
+        old.playedAt = DateTime.now();
+      }
+    }
+
+    // Make this card the active one
+    final idx = _carouselItems.indexOf(item);
+    _activeCardIndex = idx;
+    item.state = NarrationCardState.active;
+    _narrationPaused = false;
+    _playingNarration = true;
+    if (mounted) setState(() {});
+
+    // Play audio
+    final gen = _playbackGeneration;
+    await _audioService.playBase64(item.audioBase64!, startFrom: item.lastPosition);
+
+    // Audio finished — clean up if not stale
+    if (gen != _playbackGeneration) return;
+    _savePositionOnActiveCard();
+    item.state = NarrationCardState.played;
+    item.playedAt = DateTime.now();
+    _activeCardIndex = -1;
+    _playingNarration = false;
+    if (mounted) setState(() {});
+  }
+
   /// Handle the trivia interstitial pause between question and answer.
   /// Reads user preference: 'auto' (countdown), 'manual' (tap), 'instant'.
   Future<void> _handleTriviaInterstitial(PendingNarration narration) async {
@@ -755,6 +794,7 @@ class _MapScreenState extends State<MapScreen> {
           margin: EdgeInsets.zero,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           color: Colors.white,
+          surfaceTintColor: Colors.transparent,
           child: Padding(
             padding: const EdgeInsets.all(24),
             child: Column(
@@ -788,6 +828,7 @@ class _MapScreenState extends State<MapScreen> {
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         color: Colors.white,
+        surfaceTintColor: Colors.transparent,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -934,11 +975,7 @@ class _MapScreenState extends State<MapScreen> {
                             } else if (isQueued) {
                               _tripService.skipBreatheTimer();
                             } else if (item.hasAudio) {
-                              // History replay — resume from last position
-                              _audioService.playBase64(
-                                item.audioBase64!,
-                                startFrom: item.lastPosition,
-                              );
+                              _replayHistoryCard(item);
                             }
                           },
                           icon: Icon(
