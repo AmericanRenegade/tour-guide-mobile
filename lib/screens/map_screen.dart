@@ -374,6 +374,11 @@ class _MapScreenState extends State<MapScreen> {
     _activeCardIndex = index;
     card.activate();
 
+    // Align trip service so _currentlyServed and _activeGroupId match
+    // the card being played. Critical for trivia (ensures interstitial/
+    // answer are served next) and for correct advanceQueue behavior.
+    _tripService.serveNarration(card.id);
+
     if (mounted) {
       setState(() {
         _carouselVisible = true;

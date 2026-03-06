@@ -673,6 +673,19 @@ class TripService extends ChangeNotifier {
     });
   }
 
+  /// Align _currentlyServed with a specific narration (e.g. user swiped to it).
+  /// The previously-served narration (if any) stays in the pool unplayed.
+  /// Sets _activeGroupId if the narration is part of a trivia group.
+  void serveNarration(String narrationId) {
+    _currentlyServed = null;
+    final idx = _narrationPool.indexWhere((n) => n.narrationId == narrationId);
+    if (idx < 0) return;
+    _currentlyServed = _narrationPool[idx];
+    if (_currentlyServed!.isTrivia && _currentlyServed!.groupId != null) {
+      _activeGroupId = _currentlyServed!.groupId;
+    }
+  }
+
   // ── Queue management (called by MapScreen after playback) ─────────────────
 
   /// Remove the served narration after playback and confirm it as played.
