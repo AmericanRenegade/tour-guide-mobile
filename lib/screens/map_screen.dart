@@ -567,7 +567,7 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
-    if (card.completed) {
+    if (card.completed || card.visited) {
       _deactivateCurrentCard();
       if (mounted) setState(() {});
       return;

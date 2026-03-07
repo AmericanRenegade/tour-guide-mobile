@@ -66,6 +66,9 @@ class NarrationCardItem {
   /// True when all phases finished naturally (not interrupted by swipe).
   bool completed = false;
 
+  /// True once this card has been activated at least once.
+  bool visited = false;
+
   /// Trivia interstitial: waiting for user to reveal the answer.
   bool waitingForReveal = false;
   int countdownSeconds = 0;
@@ -210,6 +213,7 @@ class NarrationCardItem {
     }
     state = NarrationCardState.active;
     paused = false;
+    visited = true;
   }
 
   void deactivate() {
