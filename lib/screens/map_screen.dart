@@ -370,7 +370,11 @@ class _MapScreenState extends State<MapScreen> {
     _removeWaitingPlaceholder();
     _breatheCountdownTimer?.cancel();
 
-    _activeCardIndex = index;
+    // Re-find index after placeholder removal may have shifted items
+    final adjustedIndex = _carouselItems.indexOf(card);
+    if (adjustedIndex < 0) return;
+
+    _activeCardIndex = adjustedIndex;
     card.activate(skipBreathe: skipBreathe);
 
     // Align trip service so _currentlyServed matches the card being played.
