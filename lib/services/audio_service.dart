@@ -41,9 +41,14 @@ class AudioService {
       }
       await _player.play();
       // Wait until playback completes or is stopped.
-      await _player.playerStateStream.firstWhere((s) =>
-          s.processingState == ProcessingState.completed ||
-          s.processingState == ProcessingState.idle);
+      // skipWhile(idle) prevents matching a stale idle state left over from
+      // a previous stop() — otherwise firstWhere returns instantly and the
+      // phase loop thinks audio finished before it even started.
+      await _player.playerStateStream
+          .skipWhile((s) => s.processingState == ProcessingState.idle)
+          .firstWhere((s) =>
+              s.processingState == ProcessingState.completed ||
+              s.processingState == ProcessingState.idle);
     } catch (e) {
       debugPrint('AudioService.playBase64 error: $e');
     }
