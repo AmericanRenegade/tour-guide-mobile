@@ -438,9 +438,11 @@ class _MapScreenState extends State<MapScreen> {
       switch (phase.type) {
         case PhaseType.breatheDelay:
           final breatheLeft = _tripService.breatheSecondsRemaining;
+          debugPrint('BREATHE phase: breatheLeft=$breatheLeft cardId=${card.id}');
           if (breatheLeft > 0) {
             card.breatheTotalSeconds = breatheLeft;
             card.breatheActive = true;
+            debugPrint('BREATHE active=true totalSeconds=$breatheLeft');
             if (mounted) setState(() {});
             await Future.delayed(Duration(seconds: breatheLeft));
             card.breatheActive = false;

@@ -79,6 +79,11 @@ extension CarouselWidgets on _MapScreenState {
             mainAxisSize: MainAxisSize.min,
             children: [
               // Self-animating breathe delay progress bar
+              // DEBUG: always show breathe state
+              if (true) ...[
+                Text('DEBUG breatheActive=${item.breatheActive} totalS=${item.breatheTotalSeconds}',
+                  style: const TextStyle(fontSize: 10, color: Colors.red)),
+              ],
               if (item.breatheActive && item.breatheTotalSeconds > 0) ...[
                 Padding(
                   padding: const EdgeInsets.only(bottom: 10),
