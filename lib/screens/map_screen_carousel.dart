@@ -63,7 +63,6 @@ extension CarouselWidgets on _MapScreenState {
       );
     }
 
-    final isQueued = item.state == NarrationCardState.queued;
     final realCards = _carouselItems.where((c) => !c.isPlaceholder);
 
     return Padding(
@@ -79,24 +78,28 @@ extension CarouselWidgets on _MapScreenState {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // "Playing in Xs..." banner for queued cards with breathe delay
-              if (isQueued && item.countdownSeconds > 0) ...[
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  margin: const EdgeInsets.only(bottom: 10),
-                  decoration: BoxDecoration(
-                    color: _kTeal.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    'Playing in ${item.countdownSeconds}s...',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: _kTeal.withValues(alpha: 0.8),
-                    ),
-                    textAlign: TextAlign.center,
+              // Self-animating breathe delay progress bar
+              if (item.breatheActive && item.breatheTotalSeconds > 0) ...[
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: TweenAnimationBuilder<double>(
+                    key: ValueKey('breathe_${item.id}_${item.breatheTotalSeconds}'),
+                    tween: Tween(begin: 1.0, end: 0.0),
+                    duration: Duration(seconds: item.breatheTotalSeconds),
+                    curve: Curves.linear,
+                    builder: (context, value, _) {
+                      return ClipRRect(
+                        borderRadius: BorderRadius.circular(1.5),
+                        child: LinearProgressIndicator(
+                          value: value,
+                          minHeight: 3,
+                          backgroundColor: Colors.grey.shade200,
+                          valueColor: AlwaysStoppedAnimation(
+                            _kTeal.withValues(alpha: 0.5),
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ),
               ],
@@ -159,20 +162,29 @@ extension CarouselWidgets on _MapScreenState {
                     ),
                 ],
               ),
-              // Trivia interstitial: countdown or tap-to-reveal (active only)
+              // Trivia interstitial: countdown + tap-to-reveal (active only)
               if (isActive && item.isTriviaInterstitial && item.waitingForReveal) ...[
                 const SizedBox(height: 16),
-                if (item.countdownSeconds > 0) ...[
-                  Text(
-                    'Answer in ${item.countdownSeconds} s...',
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF7C3AED),
-                    ),
+                if (item.countdownSeconds > 0)
+                  TweenAnimationBuilder<double>(
+                    key: ValueKey('trivia_${item.id}_${item.countdownSeconds}'),
+                    tween: Tween(begin: item.countdownSeconds.toDouble(), end: 0.0),
+                    duration: Duration(seconds: item.countdownSeconds),
+                    curve: Curves.linear,
+                    builder: (context, value, _) {
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Text(
+                          'Answer in ${value.ceil()} s...',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF7C3AED),
+                          ),
+                        ),
+                      );
+                    },
                   ),
-                  const SizedBox(height: 12),
-                ],
                 SizedBox(
                   width: double.infinity,
                   height: 44,

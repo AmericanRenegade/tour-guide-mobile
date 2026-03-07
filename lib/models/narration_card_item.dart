@@ -71,6 +71,10 @@ class NarrationCardItem {
   int countdownSeconds = 0;
   Completer<void>? revealCompleter;
 
+  /// Breathe delay: total seconds for the self-animating progress bar.
+  int breatheTotalSeconds = 0;
+  bool breatheActive = false;
+
   NarrationCardItem({
     required this.id,
     required this.locationName,
@@ -216,6 +220,7 @@ class NarrationCardItem {
     paused = false;
     waitingForReveal = false;
     countdownSeconds = 0;
+    breatheActive = false;
     if (revealCompleter != null && !revealCompleter!.isCompleted) {
       revealCompleter!.complete();
     }

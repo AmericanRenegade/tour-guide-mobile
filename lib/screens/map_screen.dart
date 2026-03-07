@@ -58,8 +58,6 @@ class _MapScreenState extends State<MapScreen> {
   // Guard: set at _playActiveCard start, cleared by _deactivateCurrentCard.
   // Prevents stale _onAudioFinished from advancing the queue.
   String? _playingCardId;
-  Timer? _breatheCountdownTimer;
-  Timer? _countdownTimer; // trivia interstitial countdown
 
   // Active tour
   Tour? _activeTour;
@@ -136,8 +134,6 @@ class _MapScreenState extends State<MapScreen> {
     _previewAudioService.dispose();
     _nearbyScrollController.dispose();
     _carouselController.dispose();
-    _countdownTimer?.cancel();
-    _breatheCountdownTimer?.cancel();
     super.dispose();
   }
 
@@ -261,7 +257,6 @@ class _MapScreenState extends State<MapScreen> {
     }
     if (_tripService.tripState == TripState.idle) {
       _deactivateCurrentCard();
-      _breatheCountdownTimer?.cancel();
       _carouselVisible = false;
       _carouselOpacity = 0.0;
       if (mounted) setState(() {});
@@ -296,7 +291,6 @@ class _MapScreenState extends State<MapScreen> {
       _audioService.pause();
       pausedForLearn = true;
     }
-    _breatheCountdownTimer?.cancel();
 
     if (mounted) setState(() {
       _carouselVisible = false;
@@ -356,7 +350,6 @@ class _MapScreenState extends State<MapScreen> {
 
     _deactivateCurrentCard();
     _removeWaitingPlaceholder();
-    _breatheCountdownTimer?.cancel();
 
     // Re-find index after placeholder removal may have shifted items
     final adjustedIndex = _carouselItems.indexOf(card);
@@ -437,9 +430,12 @@ class _MapScreenState extends State<MapScreen> {
         case PhaseType.breatheDelay:
           final breatheLeft = _tripService.breatheSecondsRemaining;
           if (breatheLeft > 0) {
-            card.countdownSeconds = breatheLeft;
+            card.breatheTotalSeconds = breatheLeft;
+            card.breatheActive = true;
             if (mounted) setState(() {});
-            await _handleBreatheDelay(card, cardId, breatheLeft);
+            await Future.delayed(Duration(seconds: breatheLeft));
+            card.breatheActive = false;
+            _tripService.skipBreatheTimer();
             if (_playingCardId != cardId) return;
           }
         case PhaseType.tourProgressDelay:
@@ -512,29 +508,6 @@ class _MapScreenState extends State<MapScreen> {
     _activateCard(nextIdx);
   }
 
-  // ── Breathe countdown (phase-based) ─────────────────────────────────────
-
-  Future<void> _handleBreatheDelay(
-      NarrationCardItem card, String cardId, int seconds) async {
-    final completer = Completer<void>();
-    _breatheCountdownTimer?.cancel();
-    _breatheCountdownTimer =
-        Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_playingCardId != cardId || card.countdownSeconds <= 1) {
-        timer.cancel();
-        _breatheCountdownTimer = null;
-        card.countdownSeconds = 0;
-        _tripService.skipBreatheTimer();
-        if (!completer.isCompleted) completer.complete();
-        if (mounted) setState(() {});
-        return;
-      }
-      card.countdownSeconds--;
-      if (mounted) setState(() {});
-    });
-    await completer.future;
-  }
-
   // ── Pause / resume ───────────────────────────────────────────────────────
 
   void _togglePause() {
@@ -601,23 +574,14 @@ class _MapScreenState extends State<MapScreen> {
     card.countdownSeconds = seconds;
     if (mounted) setState(() {});
 
-    _countdownTimer?.cancel();
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (card.countdownSeconds <= 1) {
-        timer.cancel();
-        _countdownTimer = null;
-        if (!(card.revealCompleter?.isCompleted ?? true)) {
-          card.revealCompleter?.complete();
-        }
-        return;
+    // Auto-reveal after countdown; manual reveal completes early
+    Future.delayed(Duration(seconds: seconds), () {
+      if (!(card.revealCompleter?.isCompleted ?? true)) {
+        card.revealCompleter?.complete();
       }
-      card.countdownSeconds--;
-      if (mounted) setState(() {});
     });
 
     await card.revealCompleter!.future;
-    _countdownTimer?.cancel();
-    _countdownTimer = null;
     card.revealCompleter = null;
     card.waitingForReveal = false;
     if (mounted) setState(() {});
