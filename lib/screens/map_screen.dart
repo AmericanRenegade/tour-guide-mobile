@@ -58,6 +58,10 @@ class _MapScreenState extends State<MapScreen> {
   // Guard: set at _playActiveCard start, cleared by _deactivateCurrentCard.
   // Prevents stale _onAudioFinished from advancing the queue.
   String? _playingCardId;
+  // Incremented each time _playActiveCard is (re)entered; stale loops see
+  // a mismatched generation and exit. Solves: learn interrupt during breathe,
+  // pause/unpause during non-audio phases, etc.
+  int _playGeneration = 0;
 
   // Active tour
   Tour? _activeTour;
@@ -284,13 +288,14 @@ class _MapScreenState extends State<MapScreen> {
   Future<void> _startLearnPlayback() async {
     _learnPlaying = true;
 
+    final hadActiveCard = _activeCardIndex >= 0;
     final activeCard = _activeCard;
-    bool pausedForLearn = false;
     if (activeCard != null && !activeCard.paused) {
       activeCard.lastPosition = _audioService.currentPosition;
       _audioService.pause();
-      pausedForLearn = true;
     }
+    // Kill any running phase loop (breathe Future.delayed, trivia, etc.)
+    _playGeneration++;
 
     if (mounted) setState(() {
       _carouselVisible = false;
@@ -317,8 +322,10 @@ class _MapScreenState extends State<MapScreen> {
       });
     }
 
-    if (pausedForLearn && _activeCardIndex >= 0) {
-      _audioService.resume();
+    if (hadActiveCard && _activeCardIndex >= 0) {
+      // Re-enter phase loop from current phase; breathe recalculates remaining
+      // time, audio resumes from lastPosition, trivia restarts countdown.
+      _playActiveCard();
     } else if (!_isPlaying) {
       _activateNextCard();
     }
@@ -334,6 +341,7 @@ class _MapScreenState extends State<MapScreen> {
       card.deactivate();
     }
     _playingCardId = null;
+    _playGeneration++; // kill any running phase loop
     _activeCardIndex = -1;
     _audioService.stop();
   }
@@ -416,6 +424,7 @@ class _MapScreenState extends State<MapScreen> {
 
     final cardId = card.id;
     _playingCardId = cardId;
+    final gen = ++_playGeneration;
 
     if (mounted) setState(() {
       _carouselVisible = true;
@@ -423,7 +432,7 @@ class _MapScreenState extends State<MapScreen> {
     });
 
     do {
-      if (_playingCardId != cardId) return;
+      if (_playGeneration != gen) return;
       final phase = card.currentPhase;
 
       switch (phase.type) {
@@ -435,14 +444,15 @@ class _MapScreenState extends State<MapScreen> {
             if (mounted) setState(() {});
             await Future.delayed(Duration(seconds: breatheLeft));
             card.breatheActive = false;
+            if (mounted) setState(() {});
             _tripService.skipBreatheTimer();
-            if (_playingCardId != cardId) return;
+            if (_playGeneration != gen) return;
           }
         case PhaseType.tourProgressDelay:
           await Future.delayed(const Duration(seconds: 4));
         case PhaseType.triviaInterstitial:
           if (mounted) setState(() {});
-          await _handleTriviaInterstitial(card);
+          await _handleTriviaInterstitial(card, gen);
         case PhaseType.audio:
           if (phase.audioBase64 != null) {
             if (mounted) setState(() {});
@@ -453,7 +463,7 @@ class _MapScreenState extends State<MapScreen> {
           }
       }
 
-      if (_playingCardId != cardId) return;
+      if (_playGeneration != gen) return;
       if (card.paused) return;
     } while (card.advancePhase());
 
@@ -514,8 +524,14 @@ class _MapScreenState extends State<MapScreen> {
     final card = _activeCard;
     if (card == null) return;
     if (card.paused) {
-      _audioService.resume();
       card.paused = false;
+      if (card.currentPhase.type == PhaseType.audio) {
+        _audioService.resume();
+      } else {
+        // Non-audio phase (breathe, trivia, etc.) — the old loop exited on
+        // card.paused; re-enter from the current phase.
+        _playActiveCard();
+      }
     } else {
       card.lastPosition = _audioService.currentPosition;
       _audioService.pause();
@@ -551,17 +567,20 @@ class _MapScreenState extends State<MapScreen> {
 
   // ── Trivia interstitial ──────────────────────────────────────────────────
 
-  Future<void> _handleTriviaInterstitial(NarrationCardItem card) async {
+  Future<void> _handleTriviaInterstitial(NarrationCardItem card, int gen) async {
     final prefs = await SharedPreferences.getInstance();
+    if (_playGeneration != gen) return;
     final mode = prefs.getString('trivia_reveal_mode') ?? 'auto';
 
     if (mode == 'instant') return;
 
+    final completer = Completer<void>();
+    card.revealCompleter = completer;
+    card.waitingForReveal = true;
+
     if (mode == 'manual') {
-      card.revealCompleter = Completer<void>();
-      card.waitingForReveal = true;
       if (mounted) setState(() {});
-      await card.revealCompleter!.future;
+      await completer.future;
       card.revealCompleter = null;
       card.waitingForReveal = false;
       if (mounted) setState(() {});
@@ -569,19 +588,16 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     final seconds = prefs.getInt('trivia_countdown_s') ?? card.currentPhase.revealDelayS ?? 10;
-    card.revealCompleter = Completer<void>();
-    card.waitingForReveal = true;
     card.countdownSeconds = seconds;
     if (mounted) setState(() {});
 
-    // Auto-reveal after countdown; manual reveal completes early
+    // Auto-reveal after countdown; manual reveal completes early.
+    // Capture completer locally so a stale timer can't complete a fresh one.
     Future.delayed(Duration(seconds: seconds), () {
-      if (!(card.revealCompleter?.isCompleted ?? true)) {
-        card.revealCompleter?.complete();
-      }
+      if (!completer.isCompleted) completer.complete();
     });
 
-    await card.revealCompleter!.future;
+    await completer.future;
     card.revealCompleter = null;
     card.waitingForReveal = false;
     if (mounted) setState(() {});
