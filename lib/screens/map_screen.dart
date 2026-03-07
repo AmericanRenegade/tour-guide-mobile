@@ -1278,6 +1278,8 @@ class _MapScreenState extends State<MapScreen> {
         elevation: 6,
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        color: Colors.white,
+        surfaceTintColor: Colors.transparent,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           child: _tripControlRow(),
@@ -1423,6 +1425,8 @@ class _MapScreenState extends State<MapScreen> {
         elevation: 6,
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        color: Colors.white,
+        surfaceTintColor: Colors.transparent,
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxHeight: 220),
           child: pois.isEmpty
@@ -1559,6 +1563,8 @@ class _MapScreenState extends State<MapScreen> {
         elevation: 8,
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        color: Colors.white,
+        surfaceTintColor: Colors.transparent,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
