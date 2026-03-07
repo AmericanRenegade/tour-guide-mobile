@@ -276,8 +276,7 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
     _syncCarouselWithPool();
-    final breatheActive = _breatheCountdownTimer?.isActive ?? false;
-    if (!_isPlaying && !breatheActive) {
+    if (!_isPlaying) {
       _activateNextCard();
     }
   }
@@ -356,7 +355,7 @@ class _MapScreenState extends State<MapScreen> {
 
   /// THE single transition point — activate a card at [index].
   /// Called from: swipe, trip service, play button, auto-advance.
-  void _activateCard(int index) {
+  void _activateCard(int index, {bool skipBreathe = false}) {
     if (index < 0 || index >= _carouselItems.length) return;
     final card = _carouselItems[index];
     if (card.isPlaceholder) return;
@@ -372,7 +371,7 @@ class _MapScreenState extends State<MapScreen> {
     _breatheCountdownTimer?.cancel();
 
     _activeCardIndex = index;
-    card.activate();
+    card.activate(skipBreathe: skipBreathe);
 
     // Align trip service so _currentlyServed matches the card being played.
     _tripService.serveNarration(card.id);
@@ -400,67 +399,23 @@ class _MapScreenState extends State<MapScreen> {
     _playActiveCard();
   }
 
-  /// Find the next card to activate (from trip service queue).
-  /// Respects forward-only: never activates a card behind the current view.
+  /// Find the next queued card to activate (forward-only from current view).
+  /// Cards are pre-built by _syncCarouselWithPool — this just activates.
   void _activateNextCard() {
     final currentPage = _carouselController.hasClients
         ? (_carouselController.page?.round() ?? 0)
-        : -1;
+        : 0;
 
-    final narration = _tripService.pendingNarration;
-    if (narration != null) {
-      _removeWaitingPlaceholder();
-      var idx = _carouselItems.indexWhere((c) => c.id == narration.narrationId);
-      if (idx < 0) {
-        final card = _createGroupCard(narration);
-        _carouselItems.add(card);
-        for (final id in card.narrationIds) _carouselNarrationIds.add(id);
-        _enforceHistoryLimit();
-        idx = _carouselItems.length - 1;
+    for (int i = currentPage; i < _carouselItems.length; i++) {
+      final card = _carouselItems[i];
+      if (card.isPlaceholder || card.completed) continue;
+      if (card.state == NarrationCardState.queued) {
+        _activateCard(i); // breathe delay handled inside phase loop
+        return;
       }
-      if (idx >= currentPage) {
-        _activateCard(idx);
-      }
-      return;
     }
 
-    // Nothing from pendingNarration — check if there's an upcoming candidate
-    // behind a breathe timer (show it with countdown on the card).
-    final upNext = _tripService.upNextNarration;
-    if (upNext != null) {
-      _removeWaitingPlaceholder();
-      var idx = _carouselItems.indexWhere((c) => c.id == upNext.narrationId);
-      if (idx < 0) {
-        final card = _createGroupCard(upNext);
-        card.state = NarrationCardState.queued;
-        _carouselItems.add(card);
-        for (final id in card.narrationIds) _carouselNarrationIds.add(id);
-        _enforceHistoryLimit();
-        idx = _carouselItems.length - 1;
-      }
-      if (idx >= currentPage) {
-        _deactivateCurrentCard();
-        final card = _carouselItems[idx];
-        final breatheLeft = _tripService.breatheSecondsRemaining;
-        if (breatheLeft > 0) {
-          card.countdownSeconds = breatheLeft;
-          if (mounted) {
-            setState(() {
-              _carouselVisible = true;
-              _carouselOpacity = 1.0;
-            });
-            _animateToPage(idx);
-          }
-          _startBreatheCountdown(idx);
-        } else {
-          _tripService.skipBreatheTimer();
-          _activateCard(idx);
-        }
-      }
-      return;
-    }
-
-    // Nothing in pool at all — show waiting placeholder
+    // Nothing queued — show waiting placeholder
     _deactivateCurrentCard();
     _addWaitingPlaceholder();
     if (mounted) setState(() {});
@@ -496,6 +451,14 @@ class _MapScreenState extends State<MapScreen> {
       final phase = card.currentPhase;
 
       switch (phase.type) {
+        case PhaseType.breatheDelay:
+          final breatheLeft = _tripService.breatheSecondsRemaining;
+          if (breatheLeft > 0) {
+            card.countdownSeconds = breatheLeft;
+            if (mounted) setState(() {});
+            await _handleBreatheDelay(card, cardId, breatheLeft);
+            if (_playingCardId != cardId) return;
+          }
         case PhaseType.tourProgressDelay:
           await Future.delayed(const Duration(seconds: 4));
         case PhaseType.triviaInterstitial:
@@ -570,45 +533,31 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
-    // Fresh card — check breathe timer
-    final breatheLeft = _tripService.breatheSecondsRemaining;
-    if (breatheLeft > 0) {
-      nextCard.countdownSeconds = breatheLeft;
-      if (mounted) {
-        setState(() {
-          _carouselVisible = true;
-          _carouselOpacity = 1.0;
-        });
-        _animateToPage(nextIdx);
-      }
-      _startBreatheCountdown(nextIdx);
-    } else {
-      _activateCard(nextIdx);
-    }
+    // Breathe delay handled inside the phase loop
+    _activateCard(nextIdx);
   }
 
-  // ── Breathe countdown (on-card) ──────────────────────────────────────────
+  // ── Breathe countdown (phase-based) ─────────────────────────────────────
 
-  void _startBreatheCountdown(int cardIndex) {
+  Future<void> _handleBreatheDelay(
+      NarrationCardItem card, String cardId, int seconds) async {
+    final completer = Completer<void>();
     _breatheCountdownTimer?.cancel();
-    _breatheCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (cardIndex < 0 || cardIndex >= _carouselItems.length) {
-        timer.cancel();
-        return;
-      }
-      final card = _carouselItems[cardIndex];
-      if (card.countdownSeconds <= 1) {
+    _breatheCountdownTimer =
+        Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_playingCardId != cardId || card.countdownSeconds <= 1) {
         timer.cancel();
         _breatheCountdownTimer = null;
         card.countdownSeconds = 0;
-        // Breathe done — activate the card
         _tripService.skipBreatheTimer();
-        _activateCard(cardIndex);
+        if (!completer.isCompleted) completer.complete();
+        if (mounted) setState(() {});
         return;
       }
       card.countdownSeconds--;
       if (mounted) setState(() {});
     });
+    await completer.future;
   }
 
   // ── Pause / resume ───────────────────────────────────────────────────────
@@ -651,12 +600,8 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
-    // Queued or interrupted card → activate it (auto-plays from lastPosition)
-    if (card.state == NarrationCardState.queued) {
-      _breatheCountdownTimer?.cancel();
-      _tripService.skipBreatheTimer();
-    }
-    _activateCard(index);
+    // User swiped to this card → skip breathe delay
+    _activateCard(index, skipBreathe: true);
   }
 
   // ── Trivia interstitial ──────────────────────────────────────────────────
@@ -1088,7 +1033,7 @@ class _MapScreenState extends State<MapScreen> {
                             if (isActive) {
                               _togglePause();
                             } else if (cardIndex >= 0) {
-                              _activateCard(cardIndex);
+                              _activateCard(cardIndex, skipBreathe: true);
                             }
                           },
                           icon: Icon(

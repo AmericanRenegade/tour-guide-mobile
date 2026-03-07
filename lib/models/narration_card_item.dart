@@ -5,7 +5,7 @@ enum NarrationCardState { active, queued, played }
 
 // ── Playback phase ──────────────────────────────────────────────────────────
 
-enum PhaseType { audio, tourProgressDelay, triviaInterstitial }
+enum PhaseType { audio, tourProgressDelay, triviaInterstitial, breatheDelay }
 
 /// A single step in a card's playback sequence.
 class PlaybackPhase {
@@ -148,6 +148,13 @@ class NarrationCardItem {
       }
     }
 
+    // Prepend a breathe delay phase (skipped on user-initiated plays)
+    phases.insert(0, PlaybackPhase(
+      type: PhaseType.breatheDelay,
+      narrationId: primary.narrationId,
+      contentType: 'breathe_delay',
+    ));
+
     return NarrationCardItem(
       id: primary.narrationId,
       locationName: primary.locationName,
@@ -185,12 +192,17 @@ class NarrationCardItem {
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
-  void activate() {
+  void activate({bool skipBreathe = false}) {
     // If card finished playing, reset to beginning for replay
     if (completed) {
       _phaseIndex = 0;
       lastPosition = Duration.zero;
       completed = false;
+    }
+    // Skip breathe phase on user-initiated plays (swipe, replay, button)
+    if (skipBreathe && _phaseIndex == 0 &&
+        phases.isNotEmpty && phases[0].type == PhaseType.breatheDelay) {
+      _phaseIndex = 1;
     }
     state = NarrationCardState.active;
     paused = false;
@@ -212,19 +224,25 @@ class NarrationCardItem {
 
   // ── Derived properties ──────────────────────────────────────────────────
 
-  String get contentType => currentPhase.contentType;
+  /// The "real" content phase (skipping breatheDelay).
+  PlaybackPhase get _contentPhase =>
+      currentPhase.type == PhaseType.breatheDelay && phases.length > 1
+          ? phases[1]
+          : currentPhase;
+
+  String get contentType => _contentPhase.contentType;
   String get narrationText =>
-      currentPhase.narrationText ?? phases.first.narrationText ?? '';
+      _contentPhase.narrationText ?? phases.first.narrationText ?? '';
 
   bool get isPlayed => state == NarrationCardState.played;
   bool get isActive => state == NarrationCardState.active;
   bool get isTrivia => groupId != null && groupId!.isNotEmpty;
   bool get hasAudio => phases.any((p) => p.audioBase64 != null && p.audioBase64!.isNotEmpty);
 
-  bool get isTourProgress => currentPhase.isTourProgress;
-  bool get isTriviaQuestion => currentPhase.isTriviaQuestion;
-  bool get isTriviaInterstitial => currentPhase.isTriviaInterstitial;
-  bool get isTriviaAnswer => currentPhase.isTriviaAnswer;
+  bool get isTourProgress => _contentPhase.isTourProgress;
+  bool get isTriviaQuestion => _contentPhase.isTriviaQuestion;
+  bool get isTriviaInterstitial => _contentPhase.isTriviaInterstitial;
+  bool get isTriviaAnswer => _contentPhase.isTriviaAnswer;
 
   /// Answer text for history display on played trivia cards.
   String? get answerText {
