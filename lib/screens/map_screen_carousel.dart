@@ -79,11 +79,6 @@ extension CarouselWidgets on _MapScreenState {
             mainAxisSize: MainAxisSize.min,
             children: [
               // Self-animating breathe delay progress bar
-              // DEBUG: always show breathe state
-              if (true) ...[
-                Text('DEBUG breatheActive=${item.breatheActive} totalS=${item.breatheTotalSeconds}',
-                  style: const TextStyle(fontSize: 10, color: Colors.red)),
-              ],
               if (item.breatheActive && item.breatheTotalSeconds > 0) ...[
                 Padding(
                   padding: const EdgeInsets.only(bottom: 10),
@@ -217,7 +212,7 @@ extension CarouselWidgets on _MapScreenState {
                     // Play / Pause
                     () {
                       final cardIndex = _carouselItems.indexOf(item);
-                      final showPause = isActive && !item.paused;
+                      final showPause = isActive && !item.paused && !item.breatheActive;
                       final buttonLabel = showPause
                           ? 'Pause'
                           : item.completed

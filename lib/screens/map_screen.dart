@@ -438,11 +438,9 @@ class _MapScreenState extends State<MapScreen> {
       switch (phase.type) {
         case PhaseType.breatheDelay:
           final breatheLeft = _tripService.breatheSecondsRemaining;
-          debugPrint('BREATHE phase: breatheLeft=$breatheLeft cardId=${card.id}');
           if (breatheLeft > 0) {
             card.breatheTotalSeconds = breatheLeft;
             card.breatheActive = true;
-            debugPrint('BREATHE active=true totalSeconds=$breatheLeft');
             if (mounted) setState(() {});
             await Future.delayed(Duration(seconds: breatheLeft));
             card.breatheActive = false;
@@ -525,13 +523,24 @@ class _MapScreenState extends State<MapScreen> {
   void _togglePause() {
     final card = _activeCard;
     if (card == null) return;
+
+    // During breathe delay: skip it and start audio immediately.
+    if (card.breatheActive) {
+      card.breatheActive = false;
+      card.advancePhase();
+      _playGeneration++; // kill the running Future.delayed loop
+      _tripService.skipBreatheTimer();
+      _playActiveCard(); // re-enter from audio phase
+      if (mounted) setState(() {});
+      return;
+    }
+
     if (card.paused) {
       card.paused = false;
       if (card.currentPhase.type == PhaseType.audio) {
         _audioService.resume();
       } else {
-        // Non-audio phase (breathe, trivia, etc.) — the old loop exited on
-        // card.paused; re-enter from the current phase.
+        // Non-audio phase (trivia, etc.) — re-enter from the current phase.
         _playActiveCard();
       }
     } else {
