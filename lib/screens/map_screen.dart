@@ -357,13 +357,8 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     _deactivateCurrentCard();
-    _removeWaitingPlaceholder();
 
-    // Re-find index after placeholder removal may have shifted items
-    final adjustedIndex = _carouselItems.indexOf(card);
-    if (adjustedIndex < 0) return;
-
-    _activeCardIndex = adjustedIndex;
+    _activeCardIndex = index;
     card.activate(skipBreathe: skipBreathe);
 
     _tripService.serveNarration(card.id);
@@ -503,6 +498,7 @@ class _MapScreenState extends State<MapScreen> {
 
     if (nextIdx >= _carouselItems.length) {
       _addWaitingPlaceholder();
+      _animateToPage(_carouselItems.length - 1);
       if (mounted) setState(() {});
       return;
     }
@@ -555,8 +551,14 @@ class _MapScreenState extends State<MapScreen> {
 
   void _onCarouselPageChanged(int index) {
     if (index < 0 || index >= _carouselItems.length) return;
+    if (_learnPlaying) return; // Don't activate cards during learn preview
     final card = _carouselItems[index];
-    if (card.isPlaceholder) return;
+
+    if (card.isPlaceholder) {
+      _deactivateCurrentCard();
+      if (mounted) setState(() {});
+      return;
+    }
 
     if (index == _activeCardIndex) {
       if (card.paused) {
@@ -668,6 +670,16 @@ class _MapScreenState extends State<MapScreen> {
       if (narration.groupId != null) seenGroups.add(narration.groupId!);
       added = true;
     }
+    // Ensure trailing placeholder when trip is active (so user can always
+    // swipe forward to skip). Move it to end if cards were added after it.
+    if (_tripService.tripState != TripState.idle) {
+      if (_carouselItems.isEmpty || !_carouselItems.last.isPlaceholder) {
+        _carouselItems.removeWhere((c) => c.isPlaceholder);
+        _carouselItems.add(NarrationCardItem.waitingPlaceholder());
+        added = true;
+      }
+    }
+
     if (added) {
       _enforceHistoryLimit();
       if (!_carouselVisible && _carouselItems.isNotEmpty) {
@@ -688,9 +700,6 @@ class _MapScreenState extends State<MapScreen> {
     _animateToPage(_carouselItems.length - 1);
   }
 
-  void _removeWaitingPlaceholder() {
-    _carouselItems.removeWhere((c) => c.isPlaceholder);
-  }
 
   // ── Center on user ─────────────────────────────────────────────────────────
 
